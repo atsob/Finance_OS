@@ -1,0 +1,1 @@
+streamlit run Finance_App.py
