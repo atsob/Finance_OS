@@ -1,6 +1,7 @@
 streamlit
 psycopg2-binary
-pandas plotly
+pandas
+plotly
 yfinance
 python-dateutil
 quiffen
