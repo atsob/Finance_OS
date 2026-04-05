@@ -910,7 +910,7 @@ try:
             df_net = df_net.reindex(columns=new_order)
             # Χρησιμοποιούμε το .style για χρώμα και format ταυτόχρονα
             styled_df = df_net.style \
-                .applymap(color_negative_red, subset=['value_eur', 'qty']) \
+                .map(color_negative_red, subset=['value_eur', 'qty']) \
                 .apply(lambda x: style_qty_display(df_net), subset=['qty_display'], axis=0) \
                 .format({
                     "qty": "{:,.2f}",
