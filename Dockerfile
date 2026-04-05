@@ -1,19 +1,26 @@
-# app/Dockerfile
-# Python usage, definition of task, copy of files, installation, port definition and start up
 FROM python:3.13-slim
-#WORKDIR /app
+
+# Απαραίτητο για να είναι καθαρός ο φάκελος προορισμού
+WORKDIR /app
+
 RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
-#    software-properties-common \
     git \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# Τώρα το "." αναφέρεται στον άδειο φάκελο /app
 RUN git clone https://github.com/atsob/Finance_OS.git .
-#RUN pip3 install -r app/requirements.txt
+
+# Προσοχή στα paths: Αν το repo έχει φάκελο app/, άφησέ το έτσι. 
+# Αν τα αρχεία είναι χύμα, σβήσε το "app/" από παντού.
 RUN pip install --upgrade pip setuptools certifi && \
     pip install -r app/requirements.txt
+
 EXPOSE 8501
+
 HEALTHCHECK CMD curl --fail http://localhost:8501/_stcore/health
+
 ENTRYPOINT ["streamlit", "run", "app/Finance_OS.py", "--server.port=8501", "--server.address=0.0.0.0"]
 
