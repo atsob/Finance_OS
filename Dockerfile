@@ -1,6 +1,6 @@
 # app/Dockerfile
 # Python usage, definition of task, copy of files, installation, port definition and start up
-FROM python:3.14-slim
+FROM python:3.13-slim
 WORKDIR /app
 RUN apt-get update && apt-get install -y \
     build-essential \
