@@ -25,9 +25,9 @@ HEALTHCHECK CMD curl --fail http://localhost:8501/_stcore/health
 # (πρόσθεσε αυτά πριν το ENTRYPOINT αν θες defaults)
 ENV DB_NAME=Finance
 ENV DB_HOST=127.0.0.1
-DB_PORT=5432
-DB_USER=admin
-DB_PASSWORD=password
+ENV DB_PORT=5432
+ENV DB_USER=admin
+ENV DB_PASSWORD=password
 
 ENTRYPOINT ["streamlit", "run", "app/Finance_OS.py", "--server.port=8501", "--server.address=0.0.0.0"]
 
