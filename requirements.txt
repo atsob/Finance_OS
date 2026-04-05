@@ -1,1 +1,0 @@
-streamlit psycopg2-binary pandas plotly yfinance python-dateutil quiffen matplotlib
