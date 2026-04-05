@@ -1,16 +1,17 @@
 # app/Dockerfile
 # Python usage, definition of task, copy of files, installation, port definition and start up
 FROM python:3.13-slim
-WORKDIR /app
+#WORKDIR /app
 RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
 #    software-properties-common \
     git \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 RUN git clone https://github.com/atsob/Finance_OS.git .
 #RUN pip3 install -r app/requirements.txt
-RUN pip install --upgrade pip setuptools && \
+RUN pip install --upgrade pip setuptools certifi && \
     pip install -r app/requirements.txt
 EXPOSE 8501
 HEALTHCHECK CMD curl --fail http://localhost:8501/_stcore/health

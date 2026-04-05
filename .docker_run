@@ -1,6 +1,6 @@
 sudo docker run -d \
   --name finance_os \
-  --network_mode host \
+  --network host \
   -p 8501:8501 \
   --restart unless-stopped \
   finance_os
