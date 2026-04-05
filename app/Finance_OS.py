@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 import pandas as pd
 import psycopg2
@@ -17,15 +18,15 @@ import datetime as dt_lib
 #ytd = today.replace(month=1, day=1)
 
 
-
-
 # --- CONFIG & DB CONNECTION ---
 def get_connection():
     return psycopg2.connect(
-        dbname="Finance", user="admin", password="31.12.1969",
-        host="192.168.4.20", port="5432"
+        dbname=os.getenv("DB_NAME", "Finance"),
+        user=os.getenv("DB_USER", "admin"),
+        password=os.getenv("DB_PASSWORD", "password"),
+        host=os.getenv("DB_HOST", "127.0.0.1"),
+        port=os.getenv("DB_PORT", "5432")
     )
-
 
 def save_changes_old(df_edited, table_name, id_col):
     if st.button(f"💾 Save {table_name}"):

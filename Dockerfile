@@ -22,5 +22,12 @@ EXPOSE 8501
 
 HEALTHCHECK CMD curl --fail http://localhost:8501/_stcore/health
 
+# (πρόσθεσε αυτά πριν το ENTRYPOINT αν θες defaults)
+ENV DB_NAME=Finance
+ENV DB_HOST=192.168.4.20
+DB_PORT=5432
+DB_USER=admin
+DB_PASSWORD=31.12.1969
+
 ENTRYPOINT ["streamlit", "run", "app/Finance_OS.py", "--server.port=8501", "--server.address=0.0.0.0"]
 
