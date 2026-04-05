@@ -1,4 +1,0 @@
-git status
-git add .
-git commit -m "fix styler applymap for pandas 3.0"
-git push
