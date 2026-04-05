@@ -4,11 +4,22 @@ import pandas as pd
 import psycopg2
 from psycopg2.extras import execute_values
 import yfinance as yf
+import requests
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 import plotly.express as px
 import plotly.graph_objects as go
 import datetime as dt_lib
+import warnings
+
+
+warnings.filterwarnings('ignore', category=UserWarning)
+
+
+# Παράκαμψη ελέγχου SSL
+session = requests.Session()
+session.verify = False
+
 
 # 3. Ορισμός Ημερομηνιών
 #today = dt_lib.date.today()
@@ -303,7 +314,7 @@ def download_historical_fx(tsperiod):
 
              # Yahoo Ticker format: EURUSD=X (δίνει 1 EUR = X USD)
              ticker_symbol = f"EUR{symbol}=X"
-             ticker = yf.Ticker(ticker_symbol)
+             ticker = yf.Ticker(ticker_symbol, session=session)
 
              # Κατεβάζουμε δεδομένα 5 ετών (ή 'max' για όλα)
              hist = ticker.history(period=tsperiod)
@@ -353,7 +364,7 @@ def download_historical_prices(tsperiod):
              # Yahoo Ticker format: EURUSD=X (δίνει 1 EUR = X USD)
     #         ticker_symbol = f"EUR{symbol}=X"
              ticker_symbol = symbol
-             ticker = yf.Ticker(ticker_symbol)
+             ticker = yf.Ticker(ticker_symbol, session=session)
 
              # Κατεβάζουμε δεδομένα 5 ετών (ή 'max' για όλα)
              hist = ticker.history(period=tsperiod)
