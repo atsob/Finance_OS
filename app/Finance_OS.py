@@ -5,20 +5,30 @@ import psycopg2
 from psycopg2.extras import execute_values
 import yfinance as yf
 import requests
+import urllib3
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 import plotly.express as px
 import plotly.graph_objects as go
 import datetime as dt_lib
 import warnings
+import logging
 
+# Ρύθμιση του logger
+logging.basicConfig(
+    filename='app.log', 
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
-warnings.filterwarnings('ignore', category=UserWarning)
+#warnings.filterwarnings('ignore', category=UserWarning)
 
+# 1. Απενεργοποίηση των SSL Warnings (για να μην γεμίζουν τα logs)
+#urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Παράκαμψη ελέγχου SSL
+# 2. Δημιουργία session που ΑΓΝΟΕΙ το SSL verification
 session = requests.Session()
-session.verify = False
+session.verify = False  # <--- ΑΥΤΟ ΕΙΝΑΙ ΤΟ ΚΛΕΙΔΙ
 
 
 # 3. Ορισμός Ημερομηνιών
@@ -314,13 +324,15 @@ def download_historical_fx(tsperiod):
 
              # Yahoo Ticker format: EURUSD=X (δίνει 1 EUR = X USD)
              ticker_symbol = f"EUR{symbol}=X"
-             ticker = yf.Ticker(ticker_symbol, session=session)
+             logging.info(f"EUR{symbol}=X")
+             ticker = yf.Ticker(ticker_symbol)
 
              # Κατεβάζουμε δεδομένα 5 ετών (ή 'max' για όλα)
              hist = ticker.history(period=tsperiod)
 
              if hist.empty:
                  st.warning(f"⚠ Δεν βρέθηκαν δεδομένα για το {ticker_symbol}")
+                 logging.info(f"Δεν βρέθηκαν δεδομένα για το {ticker_symbol}")
                  continue
 
              # 3. Προετοιμασία δεδομένων για μαζική εισαγωγή (Bulk Insert)
@@ -339,9 +351,11 @@ def download_historical_fx(tsperiod):
 
              conn.commit()
              st.success(f"✅ Ολοκληρώθηκε η εισαγωγή για {symbol}")
+             logging.info(f"Ολοκληρώθηκε η εισαγωγή για {symbol}")
 
      except Exception as e:
          st.error(f"❌ Σφάλμα: {e}")
+         logging.info(f"Σφάλμα: {e}")
      finally:
          cur.close()
          conn.close()
@@ -360,17 +374,19 @@ def download_historical_prices(tsperiod):
 
          for sec_id, sec_name, symbol in securities:
              st.write(f"📥 Λήψη ιστορικών δεδομένων για {sec_name}...")
+             logging.info(f"Λήψη ιστορικών δεδομένων για {sec_name}...")
 
              # Yahoo Ticker format: EURUSD=X (δίνει 1 EUR = X USD)
     #         ticker_symbol = f"EUR{symbol}=X"
              ticker_symbol = symbol
-             ticker = yf.Ticker(ticker_symbol, session=session)
+             ticker = yf.Ticker(ticker_symbol)
 
              # Κατεβάζουμε δεδομένα 5 ετών (ή 'max' για όλα)
              hist = ticker.history(period=tsperiod)
 
              if hist.empty:
                  st.warning(f"⚠ Δεν βρέθηκαν δεδομένα για το {sec_name}")
+                 logging.info(f"Δεν βρέθηκαν δεδομένα για το {sec_name}")
                  continue
 
              # 3. Προετοιμασία δεδομένων για μαζική εισαγωγή (Bulk Insert)
@@ -387,9 +403,11 @@ def download_historical_prices(tsperiod):
 
              conn.commit()
              st.success(f"✅ Ολοκληρώθηκε η εισαγωγή για {symbol}")
+             logging.info(f"Ολοκληρώθηκε η εισαγωγή για {symbol}")
 
      except Exception as e:
          st.error(f"❌ Σφάλμα: {e}")
+         logging.info(f"Σφάλμα: {e}")
      finally:
          cur.close()
          conn.close()
@@ -844,13 +862,6 @@ try:
                 LEFT JOIN Latest_FX fx ON c.Currencies_Id = fx.Base_Currency_Id -- Join FX based on security currency
                 WHERE h.Quantity <> 0
             """
-        #    df_net = pd.read_sql(query_combined, conn)
-            
-        #    m1, m2, m3 = st.columns(3)
-        #    m1.metric("Net Worth", f"€ {df_net['value_eur'].sum():,.2f}")
-        #    m2.metric("Μετρητά", f"€ {df_net[df_net['type']=='Cash']['value_eur'].sum():,.2f}")
-        #    m3.metric("Επενδύσεις", f"€ {df_net[df_net['type']=='Investment']['value_eur'].sum():,.2f}")
-        #    st.dataframe(df_net, use_container_width=True, hide_index=True)
 
             df_net = pd.read_sql(query_combined, conn)
             
@@ -942,7 +953,8 @@ try:
             # Ορίζεις τη σειρά που θέλεις, παραλείποντας την 'qty'
             st.dataframe(
                 styled_df, 
-                use_container_width=True, 
+                #use_container_width=True, 
+                width="stretch", 
                 hide_index=True,
                 column_order=("name", "type", "curr", "qty_display", "value_eur"),
                 column_config={
@@ -1032,9 +1044,6 @@ try:
             with t_view:
                 query_reg = f"SELECT * FROM Bank_Transactions WHERE Accounts_Id = {acc_id} OR Target_Account_Id = {acc_id} ORDER BY Date DESC"
                 
-            #    df_reg = pd.read_sql(query_reg, conn)
-            #    save_changes(st.data_editor(df_reg, use_container_width=True, hide_index=True), "Bank_Transactions", "bank_transactions_id")
-                
                 df = pd.read_sql(query_reg, conn)
                 edited_reg = st.data_editor(df, num_rows="dynamic", key="set_reg", column_config={
                     "accounts_id": st.column_config.SelectboxColumn("Account", options=list(acc_options.keys()), format_func=lambda x: acc_options.get(x, "Unknown")),
@@ -1045,7 +1054,8 @@ try:
 
         else: # Investment Register
             df_inv = pd.read_sql(f"SELECT * FROM Investment_Transactions WHERE Accounts_Id = {acc_id} ORDER BY Date DESC", conn)
-            save_changes(st.data_editor(df_inv, use_container_width=True, key="inv_reg"), "Investment_Transactions", "inv_transactions_id")
+            #save_changes(st.data_editor(df_inv, use_container_width=True, key="inv_reg"), "Investment_Transactions", "inv_transactions_id")
+            save_changes(st.data_editor(df_inv, width="stretch", key="inv_reg"), "Investment_Transactions", "inv_transactions_id")
 
     # --- 🥧 ΕΠΕΝΔΥΣΕΙΣ ---
     elif menu == "🥧 Investments":
@@ -1085,7 +1095,8 @@ try:
                     df_inv_tx,
                     num_rows="dynamic",
                     key=f"inv_tx_editor_{inv_acc_id}",
-                    use_container_width=True,
+                    #use_container_width=True,
+                    width="stretch",
                     column_config={
                         "inv_transactions_id": st.column_config.NumberColumn("ID", disabled=True),
                         "securities_id": st.column_config.SelectboxColumn(
@@ -1112,7 +1123,8 @@ try:
                 st.data_editor(
                     df_h, 
                     key=f"inv_h_editor_{inv_acc_id}",
-                    use_container_width=True,
+                    #use_container_width=True,
+                    width="stretch",
                     column_config={
                         "securities_id": st.column_config.SelectboxColumn(
                             "Security",
@@ -1271,7 +1283,8 @@ try:
                         margin=dict(l=0, r=0, t=100, b=0)
                     )
 
-                    st.plotly_chart(fig, use_container_width=True)
+                    #st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, width="stretch")
                       
                 with tab2:
                     st.dataframe(
@@ -1288,7 +1301,8 @@ try:
                             "total_net_worth": "€ {:,.2f}",
                             "net_change": "€ {:,.2f}"
                         }),
-                        use_container_width=True,
+                        #use_container_width=True,
+                        width="stretch",
                         hide_index=True
                     )                  
                   
@@ -1368,7 +1382,8 @@ try:
                         yaxis_tickformat=',.0f',
                         xaxis=dict(range=[df_pivot['date'].min(), df_pivot['date'].max()], type='date')
                     )
-                    st.plotly_chart(fig, use_container_width=True)
+                    #st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, width="stretch")
 
                 with tab_data:
                     st.subheader("Αναλυτικά Δεδομένα Επενδύσεων")
@@ -1395,7 +1410,8 @@ try:
                     # ώστε το NumberColumn να κάνει τη δουλειά του σωστά
                     st.dataframe(
                         df_display, 
-                        use_container_width=True,
+                        #use_container_width=True,
+                        width="stretch",
                         hide_index=True,
                         column_config=col_config
                     )
@@ -1455,7 +1471,8 @@ try:
                 # Εφαρμογή χρωμάτων σε όλες τις στήλες P&L του df_acc
                 st.dataframe(
                     df_acc.style.map(color_change).format("{:,.2f} €"),
-                    use_container_width=True
+                    #use_container_width=True
+                    width="stretch"
                 )
 
                 # 3. Drill down by Selectbox
@@ -1480,7 +1497,8 @@ try:
                     df_display.style
                     .map(color_change, subset=pnl_cols)
                     .format({col: "{:,.2f} €" for col in pnl_cols + ['Value (€)']}),
-                    use_container_width=True,
+                    #use_container_width=True,
+                    width="stretch",
                     hide_index=True
                 )
 
@@ -1567,7 +1585,8 @@ try:
                 df_hpr_tx,
                 num_rows="dynamic",
                 key=f"inv_hpr_editor_{inv_sec_id}",
-                use_container_width=True,
+                #use_container_width=True,
+                width="stretch",
     #            column_config={
     #                "securities_id": st.column_config.NumberColumn("ID", disabled=True),
     #                "price_date": st.column_config.NumberColumn("Shares", format="%.8f"),
