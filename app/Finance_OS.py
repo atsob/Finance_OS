@@ -15,8 +15,14 @@ import warnings
 import logging
 from langchain_community.utilities import SQLDatabase
 from langchain_community.agent_toolkits import create_sql_agent
+#from langchain_community.agent_toolkits.sql.base import create_sql_agent
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
+from langchain_groq import ChatGroq
+from langchain_core.messages import SystemMessage
+from langchain_community.chat_models import ChatOllama
+from langchain_community.callbacks.streamlit import StreamlitCallbackHandler
+
 
 # Ρύθμιση του logger
 logging.basicConfig(
@@ -58,22 +64,46 @@ db = SQLDatabase.from_uri(pg_uri)
 #os.environ["OPENAI_API_KEY"] = "sk-...." # Ή τράβηξέ το από τα st.secrets
 openai_api_key = os.environ["OPENAI_API_KEY"]
 gemini_key = os.getenv("GOOGLE_API_KEY")
+groq_api_key = os.getenv("GROQ_API_KEY")
 
 #llm = ChatOpenAI(model="gpt-4o", temperature=0)
 # 2. Αρχικοποίηση του Gemini
-if gemini_key:
-    llm = ChatGoogleGenerativeAI(
-      #  model="gemini-1.5-flash", 
-        model="gemini-pro",  # Change from 1.5-flash to gemini-pro
-        google_api_key=gemini_key, # Χρήση της μεταβλητής, όχι του κειμένου "ΤΟ_GEMINI_KEY_ΣΟΥ"
-        temperature=0
-    )
-else:
-    st.error("Το Google API Key δεν βρέθηκε!")
+#llm = ChatGroq(
+#    groq_api_key=groq_api_key,
+#    model_name="llama-3.3-70b-versatile", # Το νεότερο και ισχυρότερο για SQL
+#    model_name="llama-3.1-8b-instant", # Πολύ μεγαλύτερα όρια, πολύ γρήγορο
+#    temperature=0
+#)
 
+
+llm = ChatOllama(
+    model="llama3.1:8b", 
+    base_url="http://127.0.0.1:11434", # Η IP του Raspberry Pi
+    temperature=0
+)
+
+
+# Ο σωστός τρόπος για να περάσεις οδηγίες στον Zero-Shot Agent
+custom_suffix = """
+Είσαι ένας βοηθός οικονομικών. Απάντησε στα ελληνικά χρησιμοποιώντας τα δεδομένα της βάσης.
+Αν ο χρήστης ρωτήσει για 'έξοδα', κοίταξε στον πίνακα bank_transactions όπου το amount είναι αρνητικό.
+Αν ρωτήσει για 'μετοχές', χρησιμοποίησε τον πίνακα investment_transactions και κάνε join με τον πίνακα securities.
+
+Question: {input}
+Thought: I should look at the tables to see what I can use.
+{agent_scratchpad}
+"""
 
 # 3. Δημιουργία του SQL Agent
-agent_executor = create_sql_agent(llm, db=db, agent_type="openai-tools", verbose=True)
+agent_executor = create_sql_agent(
+    llm=llm,
+    db=db,
+    agent_type="zero-shot-react-description",
+    verbose=True,
+    suffix=custom_suffix, # Χρησιμοποιούμε το suffix αντί για extra_prompt_messages
+    handle_parsing_errors=True,
+    allow_dangerous_requests=True
+)
 
 
 
@@ -2220,14 +2250,16 @@ try:
         st.title("AI Assistant")
         st.info("This section is under development. Stay tuned for updates!")
         
-        query = st.text_input("Ask something about your finances:", 
+        user_question  = st.text_input("Ask something about your finances:", 
                             placeholder="e.g., What was the ROI of my investments last year compared to inflation?")
 
-        if query:
-            with st.spinner("Analyzing your data..."):
-                # The agent examines the tables and provides answers
-                response = agent_executor.invoke({"input": query})
-                st.write(response["output"])
+        if user_question:
+            st_callback = StreamlitCallbackHandler(st.container())
+            response = agent_executor.invoke(
+                {"input": user_question},
+                {"callbacks": [st_callback]} # Αυτό εμφανίζει τα βήματα στο UI
+            )
+            st.write(response["output"])
 
 
     # --- ⚙️ ΡΥΘΜΙΣΕΙΣ ---
