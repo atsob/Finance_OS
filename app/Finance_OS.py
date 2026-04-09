@@ -16,11 +16,12 @@ import logging
 from langchain_community.utilities import SQLDatabase
 from langchain_community.agent_toolkits import create_sql_agent
 #from langchain_community.agent_toolkits.sql.base import create_sql_agent
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_openai import ChatOpenAI
-from langchain_groq import ChatGroq
+#from langchain_google_genai import ChatGoogleGenerativeAI
+#from langchain_openai import ChatOpenAI
+#from langchain_groq import ChatGroq
 from langchain_core.messages import SystemMessage
-from langchain_community.chat_models import ChatOllama
+#from langchain_community.chat_models import ChatOllama
+from langchain_ollama import ChatOllama
 from langchain_community.callbacks.streamlit import StreamlitCallbackHandler
 
 
