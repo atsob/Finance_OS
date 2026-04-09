@@ -13,6 +13,10 @@ import plotly.graph_objects as go
 import datetime as dt_lib
 import warnings
 import logging
+from langchain_community.utilities import SQLDatabase
+from langchain_community.agent_toolkits import create_sql_agent
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
 
 # Ρύθμιση του logger
 logging.basicConfig(
@@ -29,6 +33,48 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # 2. Δημιουργία session που ΑΓΝΟΕΙ το SSL verification
 session = requests.Session()
 session.verify = False  # <--- ΑΥΤΟ ΕΙΝΑΙ ΤΟ ΚΛΕΙΔΙ
+
+# Ανάκτηση των στοιχείων (βεβαιώσου ότι δεν είναι None)
+user = os.getenv("DB_USER", "admin")
+password = os.getenv("DB_PASSWORD", "password")
+host = os.getenv("DB_HOST", "127.0.0.1")
+port = os.getenv("DB_PORT", "5432")  # Εδώ πρέπει να είναι string αριθμός
+db_name = os.getenv("DB_NAME", "Finance")
+
+# Κατασκευή του URI με f-string
+pg_uri = f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{db_name}"
+
+# Αντικατάστησε τη γραμμή του db με αυτή:
+#db = SQLDatabase.from_uri(
+#    pg_uri,
+#    include_tables=['transactions', 'investments', 'categories'], # Βάλε τα δικά σου ονόματα πινάκων
+#    sample_rows_in_table_info=3
+#)
+
+# Τώρα το SQLDatabase θα δει "5432" και θα το κάνει int εσωτερικά
+db = SQLDatabase.from_uri(pg_uri)
+
+# 2. Αρχικοποίηση του LLM (π.χ. GPT-4o που είναι εξαιρετικό στην SQL)
+#os.environ["OPENAI_API_KEY"] = "sk-...." # Ή τράβηξέ το από τα st.secrets
+openai_api_key = os.environ["OPENAI_API_KEY"]
+gemini_key = os.getenv("GOOGLE_API_KEY")
+
+#llm = ChatOpenAI(model="gpt-4o", temperature=0)
+# 2. Αρχικοποίηση του Gemini
+if gemini_key:
+    llm = ChatGoogleGenerativeAI(
+      #  model="gemini-1.5-flash", 
+        model="gemini-pro",  # Change from 1.5-flash to gemini-pro
+        google_api_key=gemini_key, # Χρήση της μεταβλητής, όχι του κειμένου "ΤΟ_GEMINI_KEY_ΣΟΥ"
+        temperature=0
+    )
+else:
+    st.error("Το Google API Key δεν βρέθηκε!")
+
+
+# 3. Δημιουργία του SQL Agent
+agent_executor = create_sql_agent(llm, db=db, agent_type="openai-tools", verbose=True)
+
 
 
 # --- CONFIG & DB CONNECTION ---
@@ -922,6 +968,7 @@ menu = st.sidebar.radio(
         "🥧 Investments",     # Επενδύσεις (το Pie Chart δείχνει το Allocation)
         "⏳ Reports", # Ιστορικότητα (το ρολόι δείχνει την εξέλιξη στον χρόνο)
         "🌍 Market Data",     # Τιμές αγοράς/FX (η υδρόγειος για παγκόσμια δεδομένα)
+        "🧠 AI Assistant",    # Τεχνητή Νοημοσύνη για ανάλυση χαρτοφυλακίου
         "🔧 Settings"         # Ρυθμίσεις (το κλειδί για παραμετροποίηση)
     ]
 )
@@ -2169,6 +2216,19 @@ try:
                         st.balloons() # Εφέ επιτυχίας
                         st.rerun() 
      
+    elif menu == "🧠 AI Assistant":
+        st.title("AI Assistant")
+        st.info("This section is under development. Stay tuned for updates!")
+        
+        query = st.text_input("Ask something about your finances:", 
+                            placeholder="e.g., What was the ROI of my investments last year compared to inflation?")
+
+        if query:
+            with st.spinner("Analyzing your data..."):
+                # The agent examines the tables and provides answers
+                response = agent_executor.invoke({"input": query})
+                st.write(response["output"])
+
 
     # --- ⚙️ ΡΥΘΜΙΣΕΙΣ ---
     elif menu == "🔧 Settings":
