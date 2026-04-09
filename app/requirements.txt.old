@@ -1,6 +1,9 @@
 langchain-ollama
+langchain-groq
+langchain-google-genai
 langchain-community
 langchain
+langchain-openai
 sqlalchemy
 streamlit
 psycopg2-binary
