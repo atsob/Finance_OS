@@ -21,22 +21,14 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-#warnings.filterwarnings('ignore', category=UserWarning)
+warnings.filterwarnings('ignore', category=UserWarning)
 
 # 1. Απενεργοποίηση των SSL Warnings (για να μην γεμίζουν τα logs)
-#urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # 2. Δημιουργία session που ΑΓΝΟΕΙ το SSL verification
 session = requests.Session()
 session.verify = False  # <--- ΑΥΤΟ ΕΙΝΑΙ ΤΟ ΚΛΕΙΔΙ
-
-
-# 3. Ορισμός Ημερομηνιών
-#today = dt_lib.date.today()
-# Υπολογισμός Δευτέρας (WTD)
-#wtd = today - dt_lib.timedelta(days=today.weekday())
-#mtd = today.replace(day=1)
-#ytd = today.replace(month=1, day=1)
 
 
 # --- CONFIG & DB CONNECTION ---
@@ -49,130 +41,219 @@ def get_connection():
         port=os.getenv("DB_PORT", "5432")
     )
 
-def save_changes_old(df_edited, table_name, id_col):
+def update_selection():
+    # Παίρνουμε το selection από το widget και το αποθηκεύουμε μόνιμα
+    key = f"set_reg_{acc_id}"
+    if key in st.session_state:
+        st.session_state[f"last_selection_{acc_id}"] = st.session_state[key].get("selection", {}).get("rows", [])
+
+def capture_selection(key, acc_id):
+    # Μεταφέρουμε την επιλογή από το widget state σε μια σταθερή μεταβλητή
+    if key in st.session_state:
+        sel = st.session_state[key].get("selection", {}).get("rows", [])
+        st.session_state[f"active_sel_{acc_id}"] = sel
+
+def handle_selection(key, storage_key):
+    if key in st.session_state:
+        # Παίρνουμε το selection και το αποθηκεύουμε σε δικό μας κλειδί
+        selection = st.session_state[key].get("selection", {}).get("rows", [])
+        st.session_state[storage_key] = selection
+
+
+def save_changes_no_serial(df_original, df_edited, table_name, id_col):
     if st.button(f"💾 Save {table_name}"):
         conn = get_connection()
         cur = conn.cursor()
         try:
-            # 1. Διαγραφή όσων σειρών αφαιρέθηκαν από το DataFrame
-            # Παίρνουμε τα τρέχοντα IDs από το DataFrame
-            current_ids = df_edited[id_col].dropna().tolist()
-            
-            if current_ids:
-                # Διαγράφουμε από τη βάση ό,τι ΔΕΝ περιλαμβάνεται στη λίστα
-                cur.execute(f"DELETE FROM {table_name} WHERE {id_col} NOT IN %s", (tuple(current_ids),))
-            else:
-                # Αν το DataFrame είναι άδειο, σβήνουμε τα πάντα στον πίνακα
-                cur.execute(f"DELETE FROM {table_name}")
 
-            # 2. Upsert (Insert/Update) για τις υπόλοιπες γραμμές
-            for _, row in df_edited.iterrows():
-                cols = row.index.tolist()
-                vals = [None if pd.isna(v) else v for v in row.values]
-                
-                placeholders = ", ".join(["%s"] * len(cols))
-                update_stmt = ", ".join([f"{c} = EXCLUDED.{c}" for c in cols if c != id_col])
-                
-                sql = f"""
-                    INSERT INTO {table_name} ({', '.join(cols)}) 
-                    VALUES ({placeholders}) 
-                    ON CONFLICT ({id_col}) 
-                    DO UPDATE SET {update_stmt}
-                """
-                cur.execute(sql, vals)
-
-            conn.commit()
-            st.success("Changes saved successfully (including deletions)!")
-            st.rerun()
-        except Exception as e:
-            conn.rollback()
-            st.error(f"Error: {e}")
-        finally:
-            conn.close()
-
-def save_changes_1(df_edited, table_name, id_col):
-    if st.button(f"💾 Save {table_name}"):
-        conn = get_connection()
-        cur = conn.cursor()
-        try:
-            # Ειδικός χειρισμός για το Historical_FX λόγω Composite Primary Key
+            # 1. ΕΝΤΟΠΙΣΜΟΣ ΚΑΙ ΔΙΑΓΡΑΦΗ ΟΣΩΝ ΛΕΙΠΟΥΝ
             if table_name == "Historical_FX":
-                conflict_target = "base_currency_id, target_currency_id, fx_date"
-            else:
-                conflict_target = id_col
-
-            for _, row in df_edited.iterrows():
-                cols = row.index.tolist()
-                vals = [None if pd.isna(v) else v for v in row.values]
+                # Χρήση | ως διαχωριστικό γιατί η ημερομηνία έχει παύλες
+                def get_keys(df):
+                    return set(df.apply(lambda r: f"{int(r['base_currency_id'])}|{int(r['target_currency_id'])}|{r['fx_date']}", axis=1))
                 
-                placeholders = ", ".join(["%s"] * len(cols))
-                # Το update_stmt δεν πρέπει να περιλαμβάνει τις στήλες του Primary Key
-                pk_cols = [c.strip() for c in conflict_target.split(',')]
-                update_stmt = ", ".join([f"{c} = EXCLUDED.{c}" for c in cols if c not in pk_cols])
-                
-                # Αν δεν υπάρχουν στήλες για update (π.χ. μόνο το rate άλλαξε), 
-                # το DO UPDATE SET είναι απαραίτητο
-                sql = f"""
-                    INSERT INTO {table_name} ({', '.join(cols)}) 
-                    VALUES ({placeholders}) 
-                    ON CONFLICT ({conflict_target}) 
-                    DO UPDATE SET {update_stmt}
-                """
-                cur.execute(sql, vals)
+                original_keys = get_keys(df_original)
+                edited_keys = get_keys(df_edited)
+                keys_to_delete = original_keys - edited_keys
 
-            conn.commit()
-            st.success(f"Changes in {table_name} saved successfully!")
-            st.rerun()
-        except Exception as e:
-            conn.rollback()
-            st.error(f"Error: {e}")
-        finally:
-            conn.close()
+                for key in keys_to_delete:
+                    # Τώρα το split('|') θα επιστρέψει ακριβώς 3 κομμάτια
+                    b_id, t_id, f_date = key.split('|')
+                    cur.execute(f"""
+                        DELETE FROM {table_name} 
+                        WHERE base_currency_id = %s 
+                        AND target_currency_id = %s 
+                        AND fx_date = %s
+                    """, (int(b_id), int(t_id), f_date))
 
-from psycopg2.extras import execute_values
-
-def save_changes(df_edited, table_name, id_col):
-    if st.button(f"💾 Save {table_name}"):
-        conn = get_connection()
-        cur = conn.cursor()
-        try:
-            # 1. Προετοιμασία δεδομένων
+        
+            # 2. UPDATES / INSERTS (Ο υπάρχων κώδικάς σου)
             cols = df_edited.columns.tolist()
-            # Μετατροπή του DataFrame σε λίστα από tuples, χειριζόμενοι τα NaNs
-            data_tuples = [
-                tuple(None if pd.isna(v) else v for v in row) 
-                for row in df_edited.values
-            ]
+            data_tuples = [tuple(None if pd.isna(v) else v for v in row) for row in df_edited.values]
 
-            # 2. Καθορισμός των στηλών Conflict (για το Historical_FX)
             if table_name == "Historical_FX":
                 conflict_target = "base_currency_id, target_currency_id, fx_date"
-                update_cols = ["fx_rate"] # Μόνο το rate αλλάζει συνήθως
+                update_cols = ["fx_rate"]
             else:
                 conflict_target = id_col
                 update_cols = [c for c in cols if c != id_col]
 
-            # 3. Δημιουργία του Bulk SQL
             update_stmt = ", ".join([f"{c} = EXCLUDED.{c}" for c in update_cols])
+            sql = f"INSERT INTO {table_name} ({', '.join(cols)}) VALUES %s ON CONFLICT ({conflict_target}) DO UPDATE SET {update_stmt}"
             
-            sql = f"""
-                INSERT INTO {table_name} ({', '.join(cols)}) 
-                VALUES %s
-                ON CONFLICT ({conflict_target}) 
-                DO UPDATE SET {update_stmt}
-            """
-
-            # 4. Εκτέλεση σε ένα "χτύπημα"
             execute_values(cur, sql, data_tuples)
             
             conn.commit()
-            st.success(f"Επιτυχής αποθήκευση {len(df_edited)} γραμμών!")
+            st.success("Οι αλλαγές αποθηκεύτηκαν!")
             st.rerun()
         except Exception as e:
             conn.rollback()
-            st.error(f"Σφάλμα κατά την αποθήκευση: {e}")
+            st.error(f"Σφάλμα: {e}")
         finally:
             conn.close()
+
+def save_changes(df_original, df_edited, table_name, id_col, current_acc_id=None):
+    """
+    df_original: Το DataFrame όπως διαβάστηκε από τη DB (πριν τον editor)
+    df_edited: Το DataFrame που επιστρέφει ο st.data_editor
+    """
+    if st.button(f"💾 Save {table_name}"):
+        conn = get_connection()
+        cur = conn.cursor()
+        try:
+            # 1. ΕΝΤΟΠΙΣΜΟΣ ΔΙΑΓΡΑΦΩΝ
+            original_ids = set(df_original[id_col].dropna().unique())
+            edited_ids = set(df_edited[id_col].dropna().unique())
+            # Μετατροπή των IDs σε απλά Python ints για να μην χτυπάει η psycopg2
+            ids_to_delete = [int(x) for x in (original_ids - edited_ids)]
+
+            if ids_to_delete:
+                # Χρησιμοποιούμε tuple(ids_to_delete) για το query
+                cur.execute(f"DELETE FROM {table_name} WHERE {id_col} IN %s", (tuple(ids_to_delete),))
+
+            # 2. ΔΙΑΧΩΡΙΣΜΟΣ ΝΕΩΝ ΚΑΙ UPDATES
+            df_new = df_edited[df_edited[id_col].isna()].copy()
+            df_updates = df_edited[df_edited[id_col].notna()].copy()
+
+            # 3. ΕΚΤΕΛΕΣΗ UPDATES (INSERT ... ON CONFLICT)
+        #    if not df_updates.empty:
+        #        # Η astype(object) μετατρέπει τα numpy types σε python types
+        #        data_tuples = [
+        #            tuple(None if pd.isna(v) else v for v in row) 
+        #            for row in df_updates.astype(object).values.tolist()
+        #        ]
+        #        cols = df_updates.columns.tolist()
+        #        data_tuples = [tuple(None if pd.isna(v) else v for v in row) for row in df_updates.values]
+        #        update_cols = [c for c in cols if c != id_col]
+        #        update_stmt = ", ".join([f"{c} = EXCLUDED.{c}" for c in update_cols])
+        #        
+        #        sql_upd = f"INSERT INTO {table_name} ({', '.join(cols)}) VALUES %s ON CONFLICT ({id_col}) DO UPDATE SET {update_stmt}"
+        #        execute_values(cur, sql_upd, data_tuples)
+
+            # 3. ΕΚΤΕΛΕΣΗ UPDATES (Κανονικό UPDATE αντί για ON CONFLICT)
+            if not df_updates.empty:
+                cols = df_updates.columns.tolist()
+                update_cols = [c for c in cols if c != id_col]
+                
+                # Δημιουργία δυναμικού query: UPDATE table SET col1=%s, col2=%s WHERE id=%s
+                set_clause = ", ".join([f"{c} = %s" for c in update_cols])
+                sql_upd = f"UPDATE {table_name} SET {set_clause} WHERE {id_col} = %s"
+                
+                for _, row in df_updates.iterrows():
+                    # Παίρνουμε τις τιμές για το SET και στο τέλος το ID για το WHERE
+                    vals = [None if pd.isna(row[c]) else row[c] for c in update_cols]
+                    vals.append(int(row[id_col]))
+                    cur.execute(sql_upd, tuple(vals))
+
+            # 4. ΕΚΤΕΛΕΣΗ INSERTS (Χωρίς το id_col)
+            if not df_new.empty:
+                df_new_to_insert = df_new.drop(columns=[id_col])
+                data_tuples_new = [
+                    tuple(None if pd.isna(v) else v for v in row) 
+                    for row in df_new_to_insert.astype(object).values.tolist()
+                ]
+                df_new_to_insert = df_new.drop(columns=[id_col])
+                cols_new = df_new_to_insert.columns.tolist()
+                data_tuples_new = [tuple(None if pd.isna(v) else v for v in row) for row in df_new_to_insert.values]
+
+                sql_ins = f"INSERT INTO {table_name} ({', '.join(cols_new)}) VALUES %s"
+                execute_values(cur, sql_ins, data_tuples_new)
+
+            conn.commit()
+
+            # Ενημέρωση ΜΟΝΟ για τον συγκεκριμένο λογαριασμό
+            if table_name == "Bank_Transactions" and current_acc_id:
+                update_account_balances(current_acc_id)
+                
+            st.success(f"Αποθηκεύτηκαν: {len(df_updates)} ενημερώσεις, {len(df_new)} νέες, {len(ids_to_delete)} διαγραφές")
+            st.rerun()
+
+        except Exception as e:
+            conn.rollback()
+            st.error(f"Σφάλμα: {e}")
+        finally:
+            conn.close()
+
+def commit_changes(df_original, df_edited, table_name, id_col):
+    """
+    df_original: Το DataFrame όπως διαβάστηκε από τη DB (πριν τον editor)
+    df_edited: Το DataFrame που επιστρέφει ο st.data_editor
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        # 1. ΕΝΤΟΠΙΣΜΟΣ ΔΙΑΓΡΑΦΩΝ
+        original_ids = set(df_original[id_col].dropna().unique())
+        edited_ids = set(df_edited[id_col].dropna().unique())
+        # Μετατροπή των IDs σε απλά Python ints για να μην χτυπάει η psycopg2
+        ids_to_delete = [int(x) for x in (original_ids - edited_ids)]
+
+        if ids_to_delete:
+            # Χρησιμοποιούμε tuple(ids_to_delete) για το query
+            cur.execute(f"DELETE FROM {table_name} WHERE {id_col} IN %s", (tuple(ids_to_delete),))
+
+        # 2. ΔΙΑΧΩΡΙΣΜΟΣ ΝΕΩΝ ΚΑΙ UPDATES
+        df_new = df_edited[df_edited[id_col].isna()].copy()
+        df_updates = df_edited[df_edited[id_col].notna()].copy()
+
+        # 3. ΕΚΤΕΛΕΣΗ UPDATES (INSERT ... ON CONFLICT)
+        if not df_updates.empty:
+            # Η astype(object) μετατρέπει τα numpy types σε python types
+            data_tuples = [
+                tuple(None if pd.isna(v) else v for v in row) 
+                for row in df_updates.astype(object).values.tolist()
+            ]
+            cols = df_updates.columns.tolist()
+            data_tuples = [tuple(None if pd.isna(v) else v for v in row) for row in df_updates.values]
+            update_cols = [c for c in cols if c != id_col]
+            update_stmt = ", ".join([f"{c} = EXCLUDED.{c}" for c in update_cols])
+            
+            sql_upd = f"INSERT INTO {table_name} ({', '.join(cols)}) VALUES %s ON CONFLICT ({id_col}) DO UPDATE SET {update_stmt}"
+            execute_values(cur, sql_upd, data_tuples)
+
+        # 4. ΕΚΤΕΛΕΣΗ INSERTS (Χωρίς το id_col)
+        if not df_new.empty:
+            df_new_to_insert = df_new.drop(columns=[id_col])
+            data_tuples_new = [
+                tuple(None if pd.isna(v) else v for v in row) 
+                for row in df_new_to_insert.astype(object).values.tolist()
+            ]
+            df_new_to_insert = df_new.drop(columns=[id_col])
+            cols_new = df_new_to_insert.columns.tolist()
+            data_tuples_new = [tuple(None if pd.isna(v) else v for v in row) for row in df_new_to_insert.values]
+
+            sql_ins = f"INSERT INTO {table_name} ({', '.join(cols_new)}) VALUES %s"
+            execute_values(cur, sql_ins, data_tuples_new)
+
+        conn.commit()
+        st.success(f"Αποθηκεύτηκαν: {len(df_updates)} ενημερώσεις, {len(df_new)} νέες, {len(ids_to_delete)} διαγραφές")
+        st.rerun()
+
+    except Exception as e:
+        conn.rollback()
+        st.error(f"Σφάλμα: {e}")
+    finally:
+        conn.close()
 
 
 def save_changes_mid(df_edited, table_name, id_cols, filter_col=None, filter_val=None):
@@ -229,7 +310,7 @@ def save_changes_mid(df_edited, table_name, id_cols, filter_col=None, filter_val
             conn.close()
 
 
-def update_account_balances():
+def update_account_balances_OLD():
     conn = get_connection()
     cur = conn.cursor()
     
@@ -244,6 +325,40 @@ def update_account_balances():
             ), 0)
 			WHERE a.Accounts_Type NOT IN ('Pension');
         """)
+        conn.commit()
+    except Exception as e:
+        st.error(f"❌ Σφάλμα: {e}")
+    finally:
+        cur.close()
+        conn.close()
+
+def update_account_balances(target_acc_id=None):
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        if target_acc_id:
+            # Χρήση διπλών εισαγωγικών για διατήρηση του Case
+            sql = """
+                UPDATE Accounts a
+                SET Account_Balance = COALESCE((
+                    SELECT SUM(Total_Amount) 
+                    FROM Bank_Transactions t 
+                    WHERE t.Accounts_Id = a.Accounts_Id
+                ), 0)
+                WHERE a.Accounts_Id = %s;
+            """
+            cur.execute(sql, (int(target_acc_id),))
+        else:
+            sql = """
+                UPDATE Accounts a
+                SET Account_Balance = COALESCE((
+                    SELECT SUM(Total_Amount) 
+                    FROM Bank_Transactions t 
+                    WHERE t.Accounts_Id = a.Accounts_Id
+                ), 0)
+                WHERE a.Accounts_Type NOT IN ('Pension');
+            """
+            cur.execute(sql)
         conn.commit()
     except Exception as e:
         st.error(f"❌ Σφάλμα: {e}")
@@ -320,7 +435,8 @@ def download_historical_fx(tsperiod):
          currencies = cur.fetchall()
 
          for base_id, symbol in currencies:
-             st.write(f"📥 Λήψη ιστορικών δεδομένων για {symbol}...")
+             #st.write(f"📥 Λήψη ιστορικών δεδομένων για {symbol}...")
+             logging.info(f"Λήψη ιστορικών δεδομένων για {symbol}...")
 
              # Yahoo Ticker format: EURUSD=X (δίνει 1 EUR = X USD)
              ticker_symbol = f"EUR{symbol}=X"
@@ -350,7 +466,7 @@ def download_historical_fx(tsperiod):
                  """, (base_id, target_id, formatted_date, rate_to_eur))
 
              conn.commit()
-             st.success(f"✅ Ολοκληρώθηκε η εισαγωγή για {symbol}")
+             #st.success(f"✅ Ολοκληρώθηκε η εισαγωγή για {symbol}")
              logging.info(f"Ολοκληρώθηκε η εισαγωγή για {symbol}")
 
      except Exception as e:
@@ -360,7 +476,7 @@ def download_historical_fx(tsperiod):
          cur.close()
          conn.close()
 
-def download_historical_prices(tsperiod):
+def download_historical_prices_from_yahoo(tsperiod):
      conn = get_connection()
      cur = conn.cursor()
 
@@ -369,11 +485,20 @@ def download_historical_prices(tsperiod):
    #      cur.execute("SELECT Currencies_Id FROM Currencies WHERE Currencies_ShortName = 'EUR'")
    #      target_id = cur.fetchone()[0]
 
-         cur.execute("SELECT Securities_Id, Security_Name, Yahoo_Ticker FROM Securities WHERE Yahoo_Ticker IS NOT NULL AND Security_Name NOT LIKE 'Hellenic T-Bill%' ORDER BY Security_Name ASC")
+         #cur.execute("SELECT Securities_Id, Security_Name, Yahoo_Ticker FROM Securities WHERE Yahoo_Ticker IS NOT NULL AND Security_Name NOT LIKE 'Hellenic T-Bill%' ORDER BY Security_Name ASC")
+         cur.execute("""
+            SELECT Securities_Id, Security_Name, Yahoo_Ticker 
+            FROM Securities 
+            WHERE Yahoo_Ticker IS NOT NULL 
+            AND Yahoo_Ticker != '' 
+            AND Security_Name NOT LIKE 'Hellenic T-Bill%' 
+            ORDER BY Security_Name ASC
+         """)
+
          securities = cur.fetchall()
 
          for sec_id, sec_name, symbol in securities:
-             st.write(f"📥 Λήψη ιστορικών δεδομένων για {sec_name}...")
+             #st.write(f"📥 Λήψη ιστορικών δεδομένων για {sec_name}...")
              logging.info(f"Λήψη ιστορικών δεδομένων για {sec_name}...")
 
              # Yahoo Ticker format: EURUSD=X (δίνει 1 EUR = X USD)
@@ -392,17 +517,18 @@ def download_historical_prices(tsperiod):
              # 3. Προετοιμασία δεδομένων για μαζική εισαγωγή (Bulk Insert)
              for date, row in hist.iterrows():
                  rate = float(row['Close'])
+                 volume = float(row['Volume'])
                  formatted_date = date.strftime('%Y-%m-%d')
 
                  cur.execute("""
-                     INSERT INTO Historical_Prices (Securities_Id, Price_Date, Price_Close)
-                     VALUES (%s, %s, %s)
+                     INSERT INTO Historical_Prices (Securities_Id, Price_Date, Price_Close, Volume)
+                     VALUES (%s, %s, %s, %s)
                      ON CONFLICT (Securities_Id, Price_Date)
-                     DO UPDATE SET Price_Close = EXCLUDED.Price_Close
-                 """, (sec_id, formatted_date, rate))
+                     DO UPDATE SET Price_Close = EXCLUDED.Price_Close, Volume = EXCLUDED.Volume
+                 """, (sec_id, formatted_date, rate, volume))
 
              conn.commit()
-             st.success(f"✅ Ολοκληρώθηκε η εισαγωγή για {symbol}")
+             #st.success(f"✅ Ολοκληρώθηκε η εισαγωγή για {symbol}")
              logging.info(f"Ολοκληρώθηκε η εισαγωγή για {symbol}")
 
      except Exception as e:
@@ -667,24 +793,25 @@ def get_hist_inv_positions_data(start_date):
 @st.cache_data(ttl=3600)
 def get_pnl_report_data():
     conn = get_connection()
-    query = f""" ... (εδώ το SQL query από τις σελίδες 26-28 του PDF) ... """
 
     query_pnl = f"""
     WITH RECURSIVE 
     periods AS (
         SELECT 
-            date_trunc('week', CURRENT_DATE)::date as wtd_start,
-            date_trunc('month', CURRENT_DATE)::date as mtd_start,
-            date_trunc('year', CURRENT_DATE)::date as ytd_start,
+            (date_trunc('day', CURRENT_DATE) - INTERVAL '1 day')::date as dtd_start,
+            (date_trunc('week', CURRENT_DATE) - INTERVAL '1 day')::date as wtd_start,
+            (date_trunc('month', CURRENT_DATE) - INTERVAL '1 day')::date as mtd_start,
+            (date_trunc('year', CURRENT_DATE) - INTERVAL '1 day')::date as ytd_start,
             '1900-01-01'::date as all_time_start,
             CURRENT_DATE::date as today
     ),
     -- 1. Υπολογισμός Ποσοτήτων (Holdings) - Παραμένει ίδιο
     historical_holdings AS (
         SELECT 
-            p.today, p.wtd_start, p.mtd_start, p.ytd_start, p.all_time_start,
+            p.today, p.dtd_start, p.wtd_start, p.mtd_start, p.ytd_start, p.all_time_start,
             h.Accounts_Id, h.Securities_Id,
             h.Quantity as qty_today,
+            h.Quantity - COALESCE((SELECT SUM(CASE WHEN Action = 'Buy' THEN Quantity WHEN Action = 'Sell' THEN -Quantity ELSE 0 END) FROM Investment_Transactions WHERE Securities_Id = h.Securities_Id AND Accounts_Id = h.Accounts_Id AND Date > p.dtd_start), 0) as qty_dtd,
             h.Quantity - COALESCE((SELECT SUM(CASE WHEN Action = 'Buy' THEN Quantity WHEN Action = 'Sell' THEN -Quantity ELSE 0 END) FROM Investment_Transactions WHERE Securities_Id = h.Securities_Id AND Accounts_Id = h.Accounts_Id AND Date > p.wtd_start), 0) as qty_wtd,
             h.Quantity - COALESCE((SELECT SUM(CASE WHEN Action = 'Buy' THEN Quantity WHEN Action = 'Sell' THEN -Quantity ELSE 0 END) FROM Investment_Transactions WHERE Securities_Id = h.Securities_Id AND Accounts_Id = h.Accounts_Id AND Date > p.mtd_start), 0) as qty_mtd,
             h.Quantity - COALESCE((SELECT SUM(CASE WHEN Action = 'Buy' THEN Quantity WHEN Action = 'Sell' THEN -Quantity ELSE 0 END) FROM Investment_Transactions WHERE Securities_Id = h.Securities_Id AND Accounts_Id = h.Accounts_Id AND Date > p.ytd_start), 0) as qty_ytd
@@ -696,10 +823,12 @@ def get_pnl_report_data():
         SELECT 
             hh.*,
             (SELECT Price_Close FROM Historical_Prices WHERE Securities_Id = hh.Securities_Id AND Price_Date <= hh.today ORDER BY Price_Date DESC LIMIT 1) as price_today,
+            (SELECT Price_Close FROM Historical_Prices WHERE Securities_Id = hh.Securities_Id AND Price_Date <= hh.dtd_start ORDER BY Price_Date DESC LIMIT 1) as price_dtd,
             (SELECT Price_Close FROM Historical_Prices WHERE Securities_Id = hh.Securities_Id AND Price_Date <= hh.wtd_start ORDER BY Price_Date DESC LIMIT 1) as price_wtd,
             (SELECT Price_Close FROM Historical_Prices WHERE Securities_Id = hh.Securities_Id AND Price_Date <= hh.mtd_start ORDER BY Price_Date DESC LIMIT 1) as price_mtd,
             (SELECT Price_Close FROM Historical_Prices WHERE Securities_Id = hh.Securities_Id AND Price_Date <= hh.ytd_start ORDER BY Price_Date DESC LIMIT 1) as price_ytd,
             (SELECT FX_Rate FROM Historical_FX WHERE Base_Currency_Id = s.Currencies_Id AND FX_Date <= hh.today ORDER BY FX_Date DESC LIMIT 1) as fx_today,
+            (SELECT FX_Rate FROM Historical_FX WHERE Base_Currency_Id = s.Currencies_Id AND FX_Date <= hh.dtd_start ORDER BY FX_Date DESC LIMIT 1) as fx_dtd,
             (SELECT FX_Rate FROM Historical_FX WHERE Base_Currency_Id = s.Currencies_Id AND FX_Date <= hh.wtd_start ORDER BY FX_Date DESC LIMIT 1) as fx_wtd,
             (SELECT FX_Rate FROM Historical_FX WHERE Base_Currency_Id = s.Currencies_Id AND FX_Date <= hh.mtd_start ORDER BY FX_Date DESC LIMIT 1) as fx_mtd,
             (SELECT FX_Rate FROM Historical_FX WHERE Base_Currency_Id = s.Currencies_Id AND FX_Date <= hh.ytd_start ORDER BY FX_Date DESC LIMIT 1) as fx_ytd,
@@ -712,6 +841,13 @@ def get_pnl_report_data():
     cash_flows AS (
         SELECT 
             Accounts_Id, Securities_Id,
+            -- DTD
+            SUM(CASE WHEN Date > (SELECT dtd_start FROM periods) THEN 
+                (CASE 
+                    WHEN Action IN ('Buy', 'MiscExp') THEN Total_Amount 
+                    WHEN Action IN ('Sell', 'Dividend', 'IntInc', 'Reinvest', 'RtrnCap') THEN -Total_Amount 
+                    ELSE 0 END) 
+                ELSE 0 END) as cf_dtd,
             -- WTD
             SUM(CASE WHEN Date > (SELECT wtd_start FROM periods) THEN 
                 (CASE 
@@ -751,6 +887,7 @@ def get_pnl_report_data():
         pf.Accounts_Name, pf.Security_Name,
         (pf.qty_today * pf.price_today * COALESCE(pf.fx_today, 1)) as current_value_eur,
         -- P&L = Τρέχουσα Αξία - Αρχική Αξία - (Αγορές - Πωλήσεις - Μερίσματα)
+        (pf.qty_today * pf.price_today * COALESCE(pf.fx_today, 1)) - (pf.qty_dtd * pf.price_dtd * COALESCE(pf.fx_dtd, 1)) - COALESCE(cf.cf_dtd, 0) as pnl_dtd_eur,
         (pf.qty_today * pf.price_today * COALESCE(pf.fx_today, 1)) - (pf.qty_wtd * pf.price_wtd * COALESCE(pf.fx_wtd, 1)) - COALESCE(cf.cf_wtd, 0) as pnl_wtd_eur,
         (pf.qty_today * pf.price_today * COALESCE(pf.fx_today, 1)) - (pf.qty_mtd * pf.price_mtd * COALESCE(pf.fx_mtd, 1)) - COALESCE(cf.cf_mtd, 0) as pnl_mtd_eur,
         (pf.qty_today * pf.price_today * COALESCE(pf.fx_today, 1)) - (pf.qty_ytd * pf.price_ytd * COALESCE(pf.fx_ytd, 1)) - COALESCE(cf.cf_ytd, 0) as pnl_ytd_eur,
@@ -997,65 +1134,308 @@ try:
         df_payees = pd.read_sql("SELECT Payees_Id, Payees_Name FROM Payees", conn)
         
         # Βοηθητικά δεδομένα για τα Dropdowns (τα φορτώνουμε μία φορά)
-        df_acc_list = pd.read_sql("SELECT Accounts_Id, Accounts_Name FROM Accounts", conn)
+    #    df_acc_list = pd.read_sql("SELECT Accounts_Id, Accounts_Name FROM Accounts", conn)
         df_payee_list = pd.read_sql("SELECT Payees_Id, Payees_Name FROM Payees", conn)
 
-        acc_options = df_acc_list.set_index('accounts_id')['accounts_name'].to_dict()
+        # Σωστός ορισμός
+        #acc_options = df_acc_list.set_index('accounts_id')['accounts_name'].to_dict()
+
+        # 1. Δημιουργία του χάρτη λογαριασμών (όπως τον είχες)
+        acc_options = {
+            row['accounts_id']: f"{row['accounts_name']} ({row['account_balance']:,.2f})" 
+            for _, row in df_accs.iterrows()
+        }
+        acc_ids_list = list(acc_options.keys())
+
+
         payee_options = df_payee_list.set_index('payees_id')['payees_name'].to_dict()
 
+        # Μετατρέπουμε το dataframe σε λίστα από λεξικά (records) ρητά
+        account_list = df_accs.to_dict('records')
+
+        # 1. Φόρτωση Ιεραρχίας Κατηγοριών (Full Path)
+        query_cat_hierarchy = """
+        WITH RECURSIVE CategoryHierarchy AS (
+            SELECT Categories_Id, Categories_Name::TEXT as Full_Path
+            FROM Categories 
+            WHERE Parent_Category_Id IS NULL
+            UNION ALL
+            SELECT c.Categories_Id, ch.Full_Path || ' : ' || c.Categories_Name
+            FROM Categories c
+            JOIN CategoryHierarchy ch ON c.Parent_Category_Id = ch.Categories_Id
+        )
+        SELECT Categories_Id, Full_Path FROM CategoryHierarchy ORDER BY Full_Path;
+        """
+        df_cat_list = pd.read_sql(query_cat_hierarchy, conn)
+        # Δημιουργία του dictionary που έλειπε
+        cat_options = df_cat_list.set_index('categories_id')['full_path'].to_dict()
+       
+        # 1. Δημιουργούμε ένα dictionary για το mapping {id: "Name (Balance)"}
+        # Χρησιμοποιούμε list comprehension για να φτιάξουμε τις επιλογές
+    #    acc_map = {
+    #        row['accounts_id']: f"{row['accounts_name']} ({row['account_balance']:,.2f})" 
+    #        for _, row in df_accs.iterrows()
+    #    }
         
-        acc_choice = st.selectbox("Select Account:", df_accs.to_dict('records'), 
-                                  format_func=lambda x: f"{x['accounts_name']} ({x['account_balance']:,.2f})")
-        
-        acc_id = acc_choice['accounts_id']
-        acc_type = acc_choice['accounts_type']
+        # 2. Το selectbox τώρα δουλεύει με απλά IDs (Integers), όχι με αντικείμενα
+    #    acc_id = st.selectbox(
+    #        "Select Account:", 
+    #        options=list(acc_map.keys()), # Λίστα από IDs
+    #        format_func=lambda x: acc_map[x] # Εμφάνιση του ονόματος από το dictionary
+    #    )
+
+        # 2. Αρχικοποίηση αν δεν υπάρχει (για να μην πετάει το AttributeError)
+        if "account_id_internal" not in st.session_state:
+            st.session_state["account_id_internal"] = acc_ids_list[0] if acc_ids_list else None
+
+
+        # 3. Το Selectbox με χρήση του key
+        # Το Streamlit θα αποθηκεύει αυτόματα την επιλογή στο st.session_state["account_id_internal"]
+        acc_id = st.selectbox(
+            "Select Account:", 
+            options=acc_ids_list,
+            format_func=lambda x: acc_options.get(x, "Unknown"),
+            key="account_id_internal" 
+        )
+
+
+        # Ενημέρωση του index στο state όταν αλλάζει ο χρήστης χειροκίνητα
+        st.session_state.selected_acc_index = acc_ids_list.index(acc_id)
+
+
+
+
+
+        # 3. Βρίσκουμε τον τύπο του λογαριασμού από το dataframe βάσει του επιλεγμένου id
+        acc_type = df_accs.loc[df_accs['accounts_id'] == acc_id, 'accounts_type'].values[0]
 
         if acc_type not in ['Brokerage', 'Pension']:
             # Tabbed interface για καθαρότητα
             t_view, t_new = st.tabs(["👁️ View Register", "➕ New Transaction / Transfer"])
-            
+
+            if "selected_acc_index" not in st.session_state:
+                st.session_state.selected_acc_index = 0  # Προεπιλογή ο πρώτος λογαριασμός
+
             with t_new:
-                with st.form("tx_form", clear_on_submit=True):
+                st.info("Ορίστε τη συναλλαγή και από κάτω την ανάλυση σε κατηγορίες (Splits)")
+                
+                # Φόρμα κύριας συναλλαγής
+                with st.form("tx_form_with_splits"):
                     c1, c2 = st.columns(2)
                     date = c1.date_input("Ημερομηνία", datetime.now())
                     payee = c2.selectbox("Payee", df_payees.to_dict('records'), format_func=lambda x: x['payees_name'])
-                    
-                    amount = c1.number_input("Ποσό (Αρνητικό για έξοδο)", value=0.0)
-                    target_acc = c2.selectbox("Μεταφορά Προς (Target)", [None] + df_accs.to_dict('records'), 
-                                              format_func=lambda x: x['accounts_name'] if x else "Regular Transaction")
-                    
-                    t_amt = 0.0
-                    if target_acc:
-                        t_amt = st.number_input(f"Ποσό Παραλαβής ({target_acc['accounts_name']})", value=abs(amount))
-                    
+                    total_amount = st.number_input("Συνολικό Ποσό", value=0.0)
                     desc = st.text_input("Περιγραφή")
                     
-                    if st.form_submit_button("Αποθήκευση"):
-                        cur = conn.cursor()
-                        t_id = target_acc['accounts_id'] if target_acc else None
-                        cur.execute("""
-                            INSERT INTO Bank_Transactions (Accounts_Id, Date, Payees_Id, Description, Total_Amount, Target_Account_Id, Target_Amount, Cleared)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, True)
-                        """, (acc_id, date, payee['payees_id'], desc, amount, t_id, t_amt if t_id else None))
-                        conn.commit()
-                        st.success("Επιτυχής Καταχώρηση!")
-                        st.rerun()
+                    # Προετοιμασία κενού DataFrame για τα νέα Splits
+                    df_new_splits = pd.DataFrame(columns=['categories_id', 'amount', 'memo'])
+                    
+                    st.write("---")
+                    st.write("📂 Ανάλυση Κατηγοριών (Splits)")
+                    # Editor για τα νέα splits
+                    new_splits_data = st.data_editor(
+                        df_new_splits, 
+                        num_rows="dynamic", 
+                        key="new_splits_editor",
+                        column_config={
+                            "categories_id": st.column_config.SelectboxColumn("Category", options=list(cat_options.keys()), format_func=lambda x: cat_options.get(x, "Unknown"))
+                        }
+                    )
+
+                    if st.form_submit_button("🔥 Καταχώρηση Συναλλαγής & Splits"):
+                        # 1. Διασφάλιση ότι τα ποσά είναι αριθμοί (float)
+                        try:
+                            # Μετατροπή του total_amount σε float
+                            val_total_amount = float(total_amount)
+                            
+                            # Μετατροπή της στήλης amount σε αριθμητική και άθροισμα (τα κενά γίνονται 0)
+                            splits_total = pd.to_numeric(new_splits_data['amount'], errors='coerce').fillna(0).sum()
+                            
+                            # 2. Έλεγχος αν το άθροισμα ταιριάζει
+                            if abs(float(splits_total) - val_total_amount) > 0.01:
+                                st.error(f"Το άθροισμα των Splits ({splits_total:,.2f}) δεν ισούται με το Συνολικό Ποσό ({val_total_amount:,.2f})")
+                            else:
+                                cur = conn.cursor()
+                                # ... συνεχίστε με το INSERT ...
+                                cur.execute("""
+                                    INSERT INTO Bank_Transactions (Accounts_Id, Date, Payees_Id, Description, Total_Amount, Cleared)
+                                    VALUES (%s, %s, %s, %s, %s, True) RETURNING Bank_Transactions_Id
+                                """, (acc_id, date, payee['payees_id'], desc, val_total_amount))
+                                
+                                new_id = cur.fetchone()[0] # Προσθήκη [0] για να πάρουμε την τιμή από το tuple
+                                
+                                # 3. Εισαγωγή των Splits με μετατροπή σε float
+                                for _, row in new_splits_data.iterrows():
+                                    row_amount = float(pd.to_numeric(row['amount'], errors='coerce') or 0)
+                                    cur.execute("""
+                                        INSERT INTO Bank_Transaction_Splits (Bank_Transactions_Id, Categories_Id, Amount, Memo)
+                                        VALUES (%s, %s, %s, %s)
+                                    """, (new_id, row['categories_id'], row_amount, row['memo']))
+                                
+                                conn.commit()
+                                update_account_balances(st.session_state["account_id_internal"]) # Ενημέρωση
+                                st.success("Η συναλλαγή και τα splits αποθηκεύτηκαν!")
+                                st.rerun()
+                                
+                        except ValueError:
+                            st.error("Παρακαλώ εισάγετε έγκυρα αριθμητικά ποσά.")
+
+
 
             with t_view:
                 query_reg = f"SELECT * FROM Bank_Transactions WHERE Accounts_Id = {acc_id} OR Target_Account_Id = {acc_id} ORDER BY Date DESC"
-                
                 df = pd.read_sql(query_reg, conn)
-                edited_reg = st.data_editor(df, num_rows="dynamic", key="set_reg", column_config={
-                    "accounts_id": st.column_config.SelectboxColumn("Account", options=list(acc_options.keys()), format_func=lambda x: acc_options.get(x, "Unknown")),
-                    "payees_id": st.column_config.SelectboxColumn("Payee", options=list(payee_options.keys()), format_func=lambda x: payee_options.get(x, "Unknown")),
-                    "target_account_id": st.column_config.SelectboxColumn("Target Account", options=list(acc_options.keys()), format_func=lambda x: acc_options.get(x, "Unknown"))
-                })
-                save_changes(edited_reg, "Bank_Transactions", "bank_transactions_id")
+                
+             
+                # 1. Ο Editor παραμένει ως έχει για προβολή/επεξεργασία
+                # 1. Ο Editor με σωστό column_config (Dictionary αντί για Set)
+                unique_key = f"set_reg_{acc_id}"
+                edited_reg = st.data_editor(
+                    df, 
+                    num_rows="dynamic", 
+                    key=unique_key, 
+                    width="stretch", 
+                    column_config={
+                        "accounts_id": st.column_config.SelectboxColumn("Account", options=list(acc_options.keys()), format_func=lambda x: acc_options.get(x, "Unknown")),
+                        "payees_id": st.column_config.SelectboxColumn("Payee", options=list(payee_options.keys()), format_func=lambda x: payee_options.get(x, "Unknown")),
+                        "target_account_id": st.column_config.SelectboxColumn("Target Account", options=list(acc_options.keys()), format_func=lambda x: acc_options.get(x, "Unknown"))
+                    }
+                )
+
+
+
+                #st.write(df.columns.tolist())
+
+
+
+
+
+               # --- 1. Κεντρικός Πίνακας Συναλλαγών ---
+                if not edited_reg.equals(df):
+                    # Αποθήκευση χωρίς να μπλοκάρουμε τον χρήστη
+                    save_changes(df, edited_reg, "Bank_Transactions", "bank_transactions_id", current_acc_id=acc_id)
+                    st.rerun()
+
+                # --- 2. Υπολογισμός Ασυμφωνίας (για εμφάνιση Warning) ---
+                # Παίρνουμε το ποσό της επιλεγμένης συναλλαγής
+                if st.session_state.current_tx_id:
+                    main_tx = df[df['bank_transactions_id'] == st.session_state.current_tx_id]
+                    if not main_tx.empty:
+                        actual_total = float(main_tx.iloc[0]['total_amount'])
+                        
+                        # Υπολογισμός αθροίσματος splits από τη βάση
+                        sum_query = "SELECT SUM(amount) as s FROM Bank_Transaction_Splits WHERE Bank_Transactions_Id = %s"
+                        db_splits_sum = float(pd.read_sql(sum_query, conn, params=(int(st.session_state.current_tx_id),)).iloc[0]['s'] or 0)
+                        
+                        if abs(actual_total - db_splits_sum) > 0.01:
+                            st.warning(f"⚠️ **Ασυμφωνία:** Η συναλλαγή είναι {actual_total:,.2f} αλλά τα splits είναι {db_splits_sum:,.2f}. Παρακαλώ διορθώστε τα splits παρακάτω.")
+
+
+                st.write("---")
+
+                # 2. Χειροκίνητη επιλογή για τα Splits
+                st.subheader("🔍 Ανάλυση Splits")
+                col_sel, col_btn = st.columns([2, 1])
+
+                # 1. Αρχικοποίηση της κατάστασης εμφάνισης στο session_state
+                if "show_splits_pane" not in st.session_state:
+                    st.session_state.show_splits_pane = False
+                if "current_tx_id" not in st.session_state:
+                    st.session_state.current_tx_id = None
+
+                col_sel, col_btn = st.columns([2, 1])
+
+                with col_sel:
+                    available_ids = df['bank_transactions_id'].tolist()
+                    # Χρησιμοποιούμε index για να διατηρείται η επιλογή στο rerun
+                    default_ix = 0
+                    if st.session_state.current_tx_id in available_ids:
+                        default_ix = available_ids.index(st.session_state.current_tx_id) + 1
+                        
+                    selected_tx_id = st.selectbox("Επιλέξτε ID Συναλλαγής για Splits:", [None] + available_ids, index=default_ix)
+
+                #with col_btn:
+                #    st.write(" ") 
+                #    if st.button("Προβολή Splits"):
+                #        st.session_state.show_splits_pane = True
+                #        st.session_state.current_tx_id = selected_tx_id
+                #        st.rerun()
+
+
+                with col_btn:
+                    st.write(" ") 
+                    # Προσθέτουμε και το acc_id στο key για απόλυτη μοναδικότητα
+                    btn_key = f"view_splits_{acc_id}_{selected_tx_id}"
+                    if st.button("Προβολή Splits", key=btn_key):
+                        st.session_state.show_splits_pane = True
+                        st.session_state.current_tx_id = selected_tx_id
+                        st.rerun()
+
+
+
+                # 2. Έλεγχος εμφάνισης από το session_state (όχι από το κουμπί απευθείας)
+                if st.session_state.show_splits_pane and st.session_state.current_tx_id:
+                    # Αν ο χρήστης άλλαξε ID στο selectbox, κλείσε το pane ή ενημέρωσέ το
+                    if selected_tx_id != st.session_state.current_tx_id:
+                        st.session_state.show_splits_pane = False
+                        st.session_state.current_tx_id = None
+                        st.rerun()
+
+                    st.write("---")
+                    st.write(f"### 📑 Edit Splits for ID: {st.session_state.current_tx_id}")
+                    
+                    # Φόρτωση δεδομένων
+                    df_splits = pd.read_sql("SELECT * FROM Bank_Transaction_Splits WHERE Bank_Transactions_Id = %s", 
+                                            conn, params=(int(st.session_state.current_tx_id),))
+                    
+                    edited_splits = st.data_editor(
+                        df_splits,
+                        num_rows="dynamic",
+                        key=f"splits_ed_{st.session_state.current_tx_id}",
+                        width="stretch",
+                        column_config={
+                            "categories_id": st.column_config.SelectboxColumn(
+                                "Category", 
+                                options=list(cat_options.keys()), 
+                                format_func=lambda x: cat_options.get(x, "Unknown"),
+                                width="large"
+                            ),
+                            "bank_transactions_id": None
+                        }
+                    )
+                    
+                    #if st.button("💾 Save Splits Changes"):
+                    #    edited_splits['bank_transactions_id'] = st.session_state.current_tx_id
+                    #    commit_changes(df_splits, edited_splits, "Bank_Transaction_Splits", "split_id")
+                    # Πρόσθεσε ένα μοναδικό key χρησιμοποιώντας το current_tx_id
+
+
+                    # Χρήση f-string για εγγυημένη μοναδικότητα
+            #        button_key = f"save_splits_db_{st.session_state.current_tx_id}"
+
+                    # Το key περιλαμβάνει acc_id και tx_id
+                    save_btn_key = f"save_splits_{acc_id}_{st.session_state.current_tx_id}"
+                    
+                    if st.button("💾 Save Splits Changes", key=f"save_{st.session_state.current_tx_id}"):
+                        # Εδώ αποθηκεύουμε ΠΑΝΤΑ, αλλά ενημερώνουμε τον χρήστη αν ακόμα δεν ταιριάζουν
+                        new_splits_sum = edited_splits['amount'].sum()
+                        
+                        # Update στη βάση
+                        edited_splits['bank_transactions_id'] = st.session_state.current_tx_id
+                        commit_changes(df_splits, edited_splits, "Bank_Transaction_Splits", "split_id")
+                        
+                        if abs(new_splits_sum - actual_total) > 0.01:
+                            st.info(f"Τα splits αποθηκεύτηκαν, αλλά υπολείπονται {actual_total - new_splits_sum:,.2f} για να συμφωνούν με τη συναλλαγή.")
+                        else:
+                            st.success("✅ Όλα συμφωνούν!")
+                        st.rerun()
 
         else: # Investment Register
             df_inv = pd.read_sql(f"SELECT * FROM Investment_Transactions WHERE Accounts_Id = {acc_id} ORDER BY Date DESC", conn)
             #save_changes(st.data_editor(df_inv, use_container_width=True, key="inv_reg"), "Investment_Transactions", "inv_transactions_id")
-            save_changes(st.data_editor(df_inv, width="stretch", key="inv_reg"), "Investment_Transactions", "inv_transactions_id")
+            save_changes(df_inv, st.data_editor(df_inv, width="stretch", key="inv_reg"), "Investment_Transactions", "inv_transactions_id")
+
+
 
     # --- 🥧 ΕΠΕΝΔΥΣΕΙΣ ---
     elif menu == "🥧 Investments":
@@ -1107,7 +1487,7 @@ try:
                         ),
                         "action": st.column_config.SelectboxColumn(
                             "Action", 
-                            options=['Buy', 'Sell', 'Dividend', 'Reinvest', 'Split', 'ShrIn', 'ShrOut', 'IntInc', 'CashIn', 'CashOut', 'Vest', 'Expire', 'Grant', 'Exercise'],
+                            options=['Buy', 'Sell', 'Dividend', 'Reinvest', 'Split', 'ShrIn', 'ShrOut', 'IntInc', 'CashIn', 'CashOut', 'Vest', 'Expire', 'Grant', 'Exercise', 'MiscExp', 'RtrnCap'],
                             required=True
                         ),
                         "quantity": st.column_config.NumberColumn("Shares", format="%.8f"),
@@ -1115,12 +1495,12 @@ try:
                         "total_amount": st.column_config.NumberColumn("Total Cash", format="%.2f")
                     }
                 )
-                save_changes(edited_inv_tx, "Investment_Transactions", "inv_transactions_id")
+                save_changes(df_inv_tx, edited_inv_tx, "Investment_Transactions", "inv_transactions_id")
 
             with tab_hold:
                 st.subheader(f"Current Holdings: {selected_inv_acc['accounts_name']}")
                 df_h = pd.read_sql(f"SELECT * FROM Holdings WHERE Accounts_Id = {inv_acc_id}", conn)
-                st.data_editor(
+                edited_h = st.data_editor(
                     df_h, 
                     key=f"inv_h_editor_{inv_acc_id}",
                     #use_container_width=True,
@@ -1133,7 +1513,8 @@ try:
                         )
                     }
                 )
-                
+                save_changes(df_h, edited_h, "Holdings", "holdings_id")
+
                         # --- UI elements για την Ενημέρωση ---
                 st.subheader("🔄 Update Holdings")
 
@@ -1154,7 +1535,7 @@ try:
         # Υπομενού στο sidebar για να μην τρέχουν όλα μαζί
         hist_sub_menu = st.sidebar.radio(
             "Επιλέξτε Αναφορά:",
-            ["Historical Net Worth", "Historical Investment Positions", "P&L Reports"],
+            ["Historical Net Worth", "Historical Investment Positions", "P&L Reports", "Incomes & Expenses"],
             key="hist_sub_nav"
         )
 
@@ -1173,8 +1554,7 @@ try:
         # HISTORICAL NET WORTH
         if hist_sub_menu == "Historical Net Worth":        
         #with tab_net_worth_hist: # Historical Net Worth
-        
-            st.write("---")
+            #st.write("---")
             st.subheader("📈 Net Worth Progress (Monthly)")
             
             # Υπολογισμός τελευταίας ημέρας προηγούμενου μήνα
@@ -1313,8 +1693,7 @@ try:
         elif hist_sub_menu == "Historical Investment Positions":        
         #with tab_inv_hist:
             # HISTORICAL INVESTMENT POSITIONS
-            
-            st.write("---")
+            #st.write("---")
             st.subheader("📈 Investments Position Progress (Monthly)")
             
             # Υπολογισμός τελευταίας ημέρας προηγούμενου μήνα
@@ -1423,88 +1802,220 @@ try:
 
         # P&L REPORTS
         elif hist_sub_menu == "P&L Reports":
-        #with tab_pnl: # P&L Reports
-        
-            st.write("---")
-            st.subheader("📈 Investments Profit & Loss")
-          
-            # Κλήση της cached συνάρτησης
-            df_pnl = get_pnl_report_data()
+            #st.write("---")
+            tab_report, tab_movers = st.tabs(["📊 P&L Report", "🚀 Top Movers"])
+
+            with tab_report:
+                #st.write("---")
+                st.subheader("📈 Investments Profit & Loss")
             
-            if st.sidebar.button("🔄 Refresh P&L"):
-                get_pnl_report_data.clear()  # Διαγράφει την cache ΜΟΝΟ για τη συγκεκριμένη συνάρτηση
-                st.cache_data.clear() # Καθαρίζει τα πάντα για σιγουριά
-                st.rerun() # Επαναφέρει την εφαρμογή για να τρέξει το query αμέσως
-
-            try:
+                # Κλήση της cached συνάρτησης
+                df_pnl = get_pnl_report_data()
                 
-                # 1. Συνολικά Metrics
-                # Δημιουργία δύο στηλών για τα metrics
-                col1, col2, col3, col4 = st.columns(4)
+                if st.sidebar.button("🔄 Refresh P&L"):
+                    get_pnl_report_data.clear()  # Διαγράφει την cache ΜΟΝΟ για τη συγκεκριμένη συνάρτηση
+                    with st.spinner("Running :green[download_historical_fx('1d')]"):
+                        download_historical_fx("1d")
+                    with st.spinner("Running :green[download_historical_prices_from_yahoo('1d')]"):
+                        download_historical_prices_from_yahoo("1d")
+                    st.cache_data.clear() # Καθαρίζει τα πάντα για σιγουριά
+                    st.rerun() # Επαναφέρει την εφαρμογή για να τρέξει το query αμέσως
 
+                try:
+                    
+                    # 1. Συνολικά Metrics
+                    # Δημιουργία δύο στηλών για τα metrics
+                    col1, col2, col3, col4, col5 = st.columns(5)
+
+                    with col1:
+                        total_dtd_pnl = df_pnl['pnl_dtd_eur'].sum()
+                        total_current_value = df_pnl['current_value_eur'].sum()
+                        st.metric("Total Current Value (EUR)", f"{total_current_value:,.2f} €", delta=f"{total_dtd_pnl:,.2f} €")
+                    with col2:
+                        total_wtd_pnl = df_pnl['pnl_wtd_eur'].sum()
+                        st.metric("Total WTD P&L", f"{total_wtd_pnl:,.2f} €", delta=f"{total_wtd_pnl:,.2f} €")
+                    with col3:
+                        total_mtd_pnl = df_pnl['pnl_mtd_eur'].sum()
+                        st.metric("Total MTD P&L", f"{total_mtd_pnl:,.2f} €", delta=f"{total_mtd_pnl:,.2f} €")
+                    with col4:
+                        total_ytd_pnl = df_pnl['pnl_ytd_eur'].sum()
+                        st.metric("Total YTD P&L", f"{total_ytd_pnl:,.2f} €", delta=f"{total_ytd_pnl:,.2f} €")
+                    with col5:
+                        total_all_time_pnl = df_pnl['pnl_all_time_eur'].fillna(0).sum()
+                        st.metric("Total All Time P&L", f"{total_all_time_pnl:,.2f} €", delta=f"{total_all_time_pnl:,.2f} €")
+                    
+                    # 2. Group by Account
+                    df_acc = df_pnl.groupby('accounts_name')[['current_value_eur', 'pnl_dtd_eur', 'pnl_wtd_eur', 'pnl_mtd_eur', 'pnl_ytd_eur', 'pnl_all_time_eur', 'pnl_net_all_time_eur']].sum()
+                    
+                    df_acc = df_acc.rename(columns={
+                        'current_value_eur': 'Current Value',
+                        'pnl_dtd_eur': 'Daily P&L',
+                        'pnl_wtd_eur': 'Weekly P&L',
+                        'pnl_mtd_eur': 'Monthly P&L',
+                        'pnl_ytd_eur': 'YTD P&L',
+                        'pnl_all_time_eur': 'Total P&L',
+                        'pnl_net_all_time_eur': 'Total Net P&L'                    
+                    })
+                    df_acc.index.name = "Account"
+
+                    # Εφαρμογή χρωμάτων σε όλες τις στήλες P&L του df_acc
+                    st.dataframe(
+                        df_acc.style.map(color_change).format("{:,.2f} €"),
+                        #use_container_width=True
+                        width="stretch"
+                    )
+
+                    # 3. Drill down by Selectbox
+                    selected_acc = st.selectbox("Select Account for Details:", df_pnl['accounts_name'].unique())
+                    df_details = df_pnl[df_pnl['accounts_name'] == selected_acc]
+
+                    # 1. Φέρνουμε την Ποσότητα από το Holdings
+                    query_quantity = f"""
+                        SELECT H.Securities_Id, S.Security_Name, H.Quantity 
+                        FROM Holdings H
+                        JOIN Securities S ON H.Securities_Id = S.Securities_Id
+                        WHERE H.Accounts_Id = (SELECT Accounts_Id FROM Accounts WHERE Accounts_Name = '{selected_acc}')
+                    """
+                    df_qty = pd.read_sql(query_quantity, conn)
+
+                    # 2. Φέρνουμε την τελευταία τιμή από το Historical_Prices (χρησιμοποιώντας window function για σιγουριά)
+                    query_prices_old = f"""
+                        SELECT DISTINCT ON (HP1.Securities_Id) HP1.Securities_Id, S.Security_Name, HP1.Price_Close as Latest_Price
+                        FROM Historical_Prices HP1
+                        JOIN Securities S ON HP1.Securities_Id = S.Securities_Id
+                        WHERE HP1.Price_Date = (SELECT MAX(HP2.Price_Date) FROM Historical_Prices HP2 WHERE HP2.Securities_Id = HP1.Securities_Id AND HP2.Price_Date <= CURRENT_DATE)
+                        ORDER BY HP1.Securities_Id, HP1.Price_Date DESC
+                    """
+                    query_prices = f"""
+                        SELECT H.Securities_Id, S.Security_Name, 
+                            (SELECT HP.Price_Close 
+                            FROM Historical_Prices HP 
+                            WHERE HP.Securities_Id = H.Securities_Id 
+                            AND HP.Price_Date <= CURRENT_DATE ORDER BY HP.Price_Date DESC LIMIT 1) AS Latest_Price
+                        FROM Holdings H
+                        JOIN Securities S ON H.Securities_Id = S.Securities_Id
+                        WHERE H.Accounts_Id = (SELECT Accounts_Id FROM Accounts WHERE Accounts_Name = '{selected_acc}')
+                    """
+                    df_prices = pd.read_sql(query_prices, conn)
+
+                    # 3. Σύνδεση των δεδομένων στο df_details
+                    df_details = df_details.merge(df_qty, on='security_name', how='left')
+                    df_details = df_details.merge(df_prices, on='security_name', how='left')
+
+
+                    df_display = df_details[['security_name', 'quantity', 'latest_price', 'current_value_eur', 'pnl_dtd_eur', 'pnl_wtd_eur', 'pnl_mtd_eur', 'pnl_ytd_eur', 'pnl_all_time_eur', 'pnl_net_all_time_eur']].rename(columns={
+                        'security_name': 'Security',
+                        'quantity': 'Quantity',        
+                        'latest_price': 'Latest Price',      
+                        'current_value_eur': 'Value (€)',
+                        'pnl_dtd_eur': 'Daily P&L',
+                        'pnl_wtd_eur': 'Weekly P&L',
+                        'pnl_mtd_eur': 'Monthly P&L',
+                        'pnl_ytd_eur': 'YTD P&L',
+                        'pnl_all_time_eur': 'Total P&L',
+                        'pnl_net_all_time_eur': 'Total Net P&L'                    
+                    })
+
+                    # Λίστα με τις στήλες που θέλουμε να χρωματίσουμε (όλες εκτός από Security και Value)
+                    pnl_cols = ['Daily P&L', 'Weekly P&L', 'Monthly P&L', 'YTD P&L', 'Total P&L', 'Total Net P&L']
+
+                    # Εμφάνιση με st.dataframe για να λειτουργήσει το styling
+                    st.dataframe(
+                        df_display.style
+                        .map(color_change, subset=pnl_cols)
+                        .format({col: "{:,.2f} €" for col in pnl_cols + ['Value (€)']}),
+                        #use_container_width=True,
+                        width="stretch",
+                        hide_index=True
+                    )
+        
+                except Exception as e:
+                    st.error(f"Σφάλμα: {e}")
+
+                pass
+
+            with tab_movers:
+                st.subheader("🔝 Investment Top Movers (Daily)")
+                
+                # Επιλογή για το πώς θέλουμε να δούμε τους movers
+                mover_col = st.radio("Sort by:", ["Daily P&L (€)", "Daily Change (%)"], horizontal=True)
+                
+                # Υπολογισμός ποσοστιαίας μεταβολής αν δεν υπάρχει ήδη στο df_pnl
+                # Υποθέτοντας ότι: Daily Change % = (DTD_PnL / (Current_Value - DTD_PnL)) * 100
+                df_pnl['daily_change_pct'] = (df_pnl['pnl_dtd_eur'] / (df_pnl['current_value_eur'] - df_pnl['pnl_dtd_eur'])) * 100
+
+                # Προετοιμασία δεδομένων για εμφάνιση
+                df_movers = df_pnl[['security_name', 'accounts_name', 'pnl_dtd_eur', 'daily_change_pct']].copy()
+                df_movers.columns = ['Security', 'Account', 'Daily P&L (€)', 'Daily Change (%)']
+
+                col_to_sort = 'Daily P&L (€)' if mover_col == "Daily P&L (€)" else 'Daily Change (%)'
+
+                # Δύο στήλες: Top Gainers και Top Losers
+                gainer_col, loser_col = st.columns(2)
+
+                with gainer_col:
+                    st.success("📈 Top Gainers")
+                    top_gainers = df_movers.sort_values(by=col_to_sort, ascending=False).head(10)
+                    st.dataframe(top_gainers.style.format({
+                        'Daily P&L (€)': "{:,.2f} €",
+                        'Daily Change (%)': "{:,.2f}%"
+                    }), hide_index=True, use_container_width=True)
+
+                with loser_col:
+                    st.error("📉 Top Losers")
+                    top_losers = df_movers.sort_values(by=col_to_sort, ascending=True).head(10)
+                    st.dataframe(top_losers.style.format({
+                        'Daily P&L (€)': "{:,.2f} €",
+                        'Daily Change (%)': "{:,.2f}%"
+                    }), hide_index=True, use_container_width=True)
+
+        # INCOME & EXPENSES REPORTS
+        elif hist_sub_menu == "Incomes & Expenses":
+            #st.write("---")
+            tab_income, tab_expenses, tab_net = st.tabs(["💵 Incomes", "💸 Expenses", "📊 Net Totals"])
+
+            with tab_income:
+                st.subheader("💵 Total Incomes by Month")
+                # --- Income Report ---
+                df_inc = df_trans[df_trans['category_type'] == 'Income']
+                
+                col1, col2 = st.columns(2)
                 with col1:
-                    total_wtd_pnl = df_pnl['pnl_wtd_eur'].sum()
-                    st.metric("Total WTD P&L", f"{total_wtd_pnl:,.2f} €", delta=f"{total_wtd_pnl:,.2f} €")
+                    st.write("📅 **YTD (Monthly)**")
+                    ytd_inc = df_inc[df_inc['Year'] == pd.Timestamp.now().year]
+                    st.bar_chart(ytd_inc.groupby('Month')['amount_eur'].sum())
+                    
                 with col2:
-                    total_mtd_pnl = df_pnl['pnl_mtd_eur'].sum()
-                    st.metric("Total MTD P&L", f"{total_mtd_pnl:,.2f} €", delta=f"{total_mtd_pnl:,.2f} €")
-                with col3:
-                    total_ytd_pnl = df_pnl['pnl_ytd_eur'].sum()
-                    st.metric("Total YTD P&L", f"{total_ytd_pnl:,.2f} €", delta=f"{total_ytd_pnl:,.2f} €")
-                with col4:
-                    total_all_time_pnl = df_pnl['pnl_all_time_eur'].fillna(0).sum()
-                    st.metric("Total All Time P&L", f"{total_all_time_pnl:,.2f} €", delta=f"{total_all_time_pnl:,.2f} €")
-                
-                # 2. Group by Account
-                df_acc = df_pnl.groupby('accounts_name')[['current_value_eur', 'pnl_wtd_eur', 'pnl_mtd_eur', 'pnl_ytd_eur', 'pnl_all_time_eur', 'pnl_net_all_time_eur']].sum()
-                
-                df_acc = df_acc.rename(columns={
-                    'current_value_eur': 'Current Value',
-                    'pnl_wtd_eur': 'Weekly P&L',
-                    'pnl_mtd_eur': 'Monthly P&L',
-                    'pnl_ytd_eur': 'YTD P&L',
-                    'pnl_all_time_eur': 'Total P&L',
-                    'pnl_net_all_time_eur': 'Total Net P&L'                    
-                })
-                df_acc.index.name = "Account"
+                    st.write("🌍 **All Time (Yearly)**")
+                    st.line_chart(df_inc.groupby('Year')['amount_eur'].sum())
 
-                # Εφαρμογή χρωμάτων σε όλες τις στήλες P&L του df_acc
+            with tab_expenses:
+                st.subheader("💸 Total Expenses by Month")
+                # --- Expenses Report ---
+                df_exp = df_trans[df_trans['category_type'] == 'Expense']
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.write("📅 **YTD (Monthly)**")
+                    ytd_exp = df_exp[df_exp['Year'] == pd.Timestamp.now().year]
+                    st.bar_chart(ytd_exp.groupby('Month')['amount_eur'].sum(), color="#FF4B4B")
+                    
+                with col2:
+                    st.write("🌍 **All Time (Yearly)**")
+                    st.line_chart(df_exp.groupby('Year')['amount_eur'].sum(), color="#FF4B4B")
+
+            with tab_net:
+                st.write("📊 **Net Totals (Consolidated)**")
+                # Pivot table για σύγκριση
+                net_df = df_trans.groupby(['Year', 'category_type'])['amount_eur'].sum().unstack(fill_value=0)
+                net_df['Net'] = net_df.get('Income', 0) - net_df.get('Expense', 0)
+                
                 st.dataframe(
-                    df_acc.style.map(color_change).format("{:,.2f} €"),
-                    #use_container_width=True
+                    net_df.style.map(color_change, subset=['Net']).format("{:,.2f} €"),
                     width="stretch"
                 )
+                st.line_chart(net_df['Net'])
 
-                # 3. Drill down by Selectbox
-                selected_acc = st.selectbox("Select Account for Details:", df_pnl['accounts_name'].unique())
-                df_details = df_pnl[df_pnl['accounts_name'] == selected_acc]
-
-                df_display = df_details[['security_name', 'current_value_eur', 'pnl_wtd_eur', 'pnl_mtd_eur', 'pnl_ytd_eur', 'pnl_all_time_eur', 'pnl_net_all_time_eur']].rename(columns={
-                    'security_name': 'Security',
-                    'current_value_eur': 'Value (€)',
-                    'pnl_wtd_eur': 'Weekly P&L',
-                    'pnl_mtd_eur': 'Monthly P&L',
-                    'pnl_ytd_eur': 'YTD P&L',
-                    'pnl_all_time_eur': 'Total P&L',
-                    'pnl_net_all_time_eur': 'Total Net P&L'                    
-                })
-
-                # Λίστα με τις στήλες που θέλουμε να χρωματίσουμε (όλες εκτός από Security και Value)
-                pnl_cols = ['Weekly P&L', 'Monthly P&L', 'YTD P&L', 'Total P&L', 'Total Net P&L']
-
-                # Εμφάνιση με st.dataframe για να λειτουργήσει το styling
-                st.dataframe(
-                    df_display.style
-                    .map(color_change, subset=pnl_cols)
-                    .format({col: "{:,.2f} €" for col in pnl_cols + ['Value (€)']}),
-                    #use_container_width=True,
-                    width="stretch",
-                    hide_index=True
-                )
-
-               
-            except Exception as e:
-                st.error(f"Σφάλμα: {e}")
 
 
     # --- ⚙️ MARKET DATA ---
@@ -1514,21 +2025,46 @@ try:
 
         # Βοηθητικά δεδομένα για τα Dropdowns (τα φορτώνουμε μία φορά)
         df_curr_list = pd.read_sql("SELECT Currencies_Id, Currencies_ShortName FROM Currencies", conn)
-#        df_inst_list = pd.read_sql("SELECT FinancialInstitutions_Id, FinancialInstitutions_Name FROM FinancialInstitutions", conn)
-#        df_sec_list = pd.read_sql("SELECT Securities_Id, Security_Name FROM Securities", conn)
         
         curr_options = df_curr_list.set_index('currencies_id')['currencies_shortname'].to_dict()
-#        inst_options = df_inst_list.set_index('financialinstitutions_id')['financialinstitutions_name'].to_dict()
-#        sec_options = df_sec_list.set_index('securities_id')['security_name'].to_dict()
         
         with t1: # Historical FX Rates
-            df = pd.read_sql("SELECT * FROM Historical_FX ORDER BY FX_Date DESC", conn)
+            df = pd.read_sql("SELECT * FROM Historical_FX ORDER BY FX_Date DESC, Base_Currency_Id ASC", conn)
             edited_hfx = st.data_editor(df, num_rows="dynamic", key="set_hfx", column_config={
                 "base_currency_id": st.column_config.SelectboxColumn("Base Currency", options=list(curr_options.keys()), format_func=lambda x: curr_options.get(x, "Unknown")),
                 "target_currency_id": st.column_config.SelectboxColumn("Target Currency", options=list(curr_options.keys()), format_func=lambda x: curr_options.get(x, "Unknown"))
             })
-            save_changes(edited_hfx, "Historical_FX", "fx_date")
-            
+            save_changes_no_serial(df, edited_hfx, "Historical_FX", "fx_date")
+
+            # --- Γράφημα Ιστορικότητας Ισοτιμιών ---
+            if not df.empty:
+                st.subheader("📈 Διάγραμμα Ισοτιμιών")
+                
+                # Δημιουργία στήλης με το όνομα του ζεύγους (π.χ. EUR/USD) για το UI
+                df_plot = df.copy()
+                df_plot['Pair'] = df_plot.apply(
+                    lambda row: f"{curr_options.get(row['base_currency_id'], '??')}/{curr_options.get(row['target_currency_id'], '??')}", 
+                    axis=1
+                )
+
+                # Επιλογή ζεύγους για προβολή στο γράφημα
+                available_pairs = df_plot['Pair'].unique()
+                selected_pair = st.selectbox("Επιλέξτε ζεύγος για προβολή:", available_pairs)
+
+                # Φιλτράρισμα δεδομένων για το επιλεγμένο ζεύγος
+                chart_data = df_plot[df_plot['Pair'] == selected_pair].sort_values('fx_date')
+
+                # Προβολή γραφήματος
+                if not chart_data.empty:
+                    st.line_chart(
+                        data=chart_data, 
+                        x='fx_date', 
+                        y='fx_rate', 
+                        use_container_width=True
+                    )
+                else:
+                    st.info("Δεν υπάρχουν δεδομένα για το επιλεγμένο ζεύγος.")
+
             # --- UI elements για το Download ---
             st.subheader("🔄 Ενημέρωση Συναλλαγματικών Ισοτιμιών")
 
@@ -1550,6 +2086,7 @@ try:
                     "30 Έτη": "30y",
                     "Όλα": "max"
                 }
+
                 selected_label = st.selectbox("Επιλέξτε χρονικό διάστημα:", list(period_options.keys()), index=1)
                 ts_period = period_options[selected_label]
 
@@ -1587,13 +2124,7 @@ try:
                 key=f"inv_hpr_editor_{inv_sec_id}",
                 #use_container_width=True,
                 width="stretch",
-    #            column_config={
-    #                "securities_id": st.column_config.NumberColumn("ID", disabled=True),
-    #                "price_date": st.column_config.NumberColumn("Shares", format="%.8f"),
-    #                "price_close": st.column_config.NumberColumn("Price", format="%.8f")
-    #            }
             )
-    #        save_changes(edited_hpr_tx, "Historical_Prices", "price_date")
 
             save_changes_mid(
                 edited_hpr_tx, 
@@ -1634,7 +2165,7 @@ try:
                 # Το κουμπί που καλεί τη συνάρτηση
                 if st.button("🚀 Λήψη Αποτιμήσεων"):
                     with st.spinner("Παρακαλώ περιμένετε, η διαδικασία είναι σε εξέλιξη..."):
-                        download_historical_prices(ts_period)
+                        download_historical_prices_from_yahoo(ts_period)
                         st.balloons() # Εφέ επιτυχίας
                         st.rerun() 
      
@@ -1655,37 +2186,36 @@ try:
 
         with t1: # Currencies
             df = pd.read_sql("SELECT * FROM Currencies ORDER BY Currencies_Id", conn)
-            save_changes(st.data_editor(df, num_rows="dynamic", key="set_curr"), "Currencies", "currencies_id")
+            save_changes(df, st.data_editor(df, num_rows="dynamic", key="set_curr"), "Currencies", "currencies_id")
 
         with t2: # Institutions
             #CREATE TYPE Institution_Type AS ENUM ('Bank', 'Credit Union', 'Insurance', 'Pension Fund', 'Broker', 'Crypto Exchange', 'Internal', 'Other');
 
             
             df = pd.read_sql("SELECT * FROM FinancialInstitutions ORDER BY FinancialInstitutions_Id", conn)
-            #save_changes(st.data_editor(df, num_rows="dynamic", key="set_inst"), "FinancialInstitutions", "financialinstitutions_id")
 
             edited_inst = st.data_editor(df, num_rows="dynamic", key="set_inst", column_config={
                 "financialinstitutions_type": st.column_config.SelectboxColumn("Institution Type", options=['Bank', 'Credit Union', 'Insurance', 'Pension Fund', 'Broker', 'Crypto Exchange', 'Internal', 'Other'])
             })
-            save_changes(edited_inst, "FinancialInstitutions", "financialinstitutions_id")
+            save_changes(df, edited_inst, "FinancialInstitutions", "financialinstitutions_id")
         with t3: # Categories
             df = pd.read_sql("SELECT * FROM Categories ORDER BY Categories_Id", conn)
             edited_cat = st.data_editor(df, num_rows="dynamic", key="set_cat", column_config={
                 "category_type": st.column_config.SelectboxColumn("Type", options=['Income', 'Expense', 'Transfer', 'Investment_Buy', 'Investment_Sell', 'Dividend', 'Interest', 'Tax', 'Fee'])
             })
-            save_changes(edited_cat, "Categories", "categories_id")
+            save_changes(df, edited_cat, "Categories", "categories_id")
 
         with t4: # Securities
-            df = pd.read_sql("SELECT * FROM Securities ORDER BY Securities_Id", conn)
+            df = pd.read_sql("SELECT * FROM Securities ORDER BY Security_Name", conn)
             edited_sec = st.data_editor(df, num_rows="dynamic", key="set_sec", column_config={
                 "security_type": st.column_config.SelectboxColumn("Type", options=['Stock', 'ETF', 'Bond', 'CD', 'Emp. Stock Opt.', 'FX Spot', 'Market Index', 'Mutual Fund', 'Crypto', 'Option', 'Commodity', 'PF_Unit', 'Other']),
                 "currencies_id": st.column_config.SelectboxColumn("Currency", options=list(curr_options.keys()), format_func=lambda x: curr_options.get(x, "Unknown"))
             })
-            save_changes(edited_sec, "Securities", "securities_id")
+            save_changes(df, edited_sec, "Securities", "securities_id")
             
         with t5: # Payees
             df = pd.read_sql("SELECT * FROM Payees ORDER BY Payees_Id", conn)
-            save_changes(st.data_editor(df, num_rows="dynamic", key="set_pay"), "Payees", "payees_id")
+            save_changes(df, st.data_editor(df, num_rows="dynamic", key="set_pay"), "Payees", "payees_id")
 
         with t6: # Accounts
             df = pd.read_sql("SELECT * FROM Accounts ORDER BY Accounts_Id", conn)
@@ -1695,7 +2225,7 @@ try:
                 "currencies_id": st.column_config.SelectboxColumn("Currency", options=list(curr_options.keys()), format_func=lambda x: curr_options.get(x, "Unknown")),
                 "is_active": st.column_config.CheckboxColumn("Active")
             })
-            save_changes(edited_acc, "Accounts", "accounts_id")
+            save_changes(df, edited_acc, "Accounts", "accounts_id")
             
     conn.close()
 except Exception as e:

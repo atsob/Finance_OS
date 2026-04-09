@@ -291,9 +291,15 @@ for acc_name, acc_obj in qif.accounts.items():
                     for split in tx.splits:
                         cat_id = None
                         if split.category:
-                            # Χρήση .name αν είναι αντικείμενο, αλλιώς το ίδιο το split.category
-                            cat_name = split.category.name if hasattr(split.category, 'name') else split.category
-                        #    cat_id = get_or_create_category_id("Categories", "categories_id", "categories_name", cat_name)
+                            # Προτεραιότητα στο hierarchy για να πάρουμε το πλήρες μονοπάτι (π.χ. Healthcare:Dental)
+                            if hasattr(split.category, 'hierarchy') and split.category.hierarchy:
+                                cat_name = split.category.hierarchy
+                            elif hasattr(split.category, 'name'):
+                                cat_name = split.category.name
+                            else:
+                                cat_name = str(split.category)
+                            
+                            # Χρήση της αναδρομικής συνάρτησης για σωστή τοποθέτηση στην ιεραρχία
                             cat_id = get_or_create_category_recursive(cat_name, cat_type='Expense')
                         
                         cur.execute("""
@@ -304,20 +310,29 @@ for acc_name, acc_obj in qif.accounts.items():
                 else:
                     # Fallback αν δεν υπάρχουν splits
                     cat_id = None
-                    if hasattr(tx, 'category') and tx.category:
-                        # Εδώ είναι η διόρθωση για το σφάλμα σας:
-                        cat_name = tx.category.name if hasattr(tx.category, 'name') else tx.category
-                        cat_id = get_or_create_id("Categories", "categories_id", "categories_name", cat_name)
+
+                    # Δοκίμασε αυτό το print για να δεις όλη τη δομή
+                    #print(f"DEBUG: Category object: {tx.category} | Type: {type(tx.category)}")
                     
+                    if hasattr(tx, 'category') and tx.category:
+                        # Χρήση της ιδιότητας hierarchy που περιέχει το πλήρες μονοπάτι
+                        if hasattr(tx.category, 'hierarchy') and tx.category.hierarchy:
+                            cat_name = tx.category.hierarchy
+                        elif hasattr(tx.category, 'name'):
+                            cat_name = tx.category.name
+                        else:
+                            cat_name = str(tx.category)
+                        
+                        # 2. Χρήση της RECURSIVE συνάρτησης
+                        cat_id = get_or_create_category_recursive(cat_name, cat_type='Expense')
+ 
+                        print(now.strftime("%Y-%m-%d %H:%M:%S") + " - Εισαγωγή Συναλλαγής με κατηγορία " + cat_name)
+ 
                     cur.execute("""
                         INSERT INTO Bank_Transaction_Splits (Bank_Transactions_Id, Categories_Id, Amount, Memo)
                         VALUES (%s, %s, %s, %s)
                     """, (bt_id, clean_id(cat_id), tx.amount, tx.memo))
-
-
-
-
-
+                    
             elif hasattr(tx, 'security'):  # Επενδυτική Συναλλαγή
                 # Χρησιμοποιούμε το security name ως ticker αν το ticker λείπει
                 # και το περιορίζουμε για σιγουριά, αν και κάναμε ALTER
@@ -343,6 +358,7 @@ for acc_name, acc_obj in qif.accounts.items():
                     'DivX': 'Dividend', 
                     'Dividend': 'Dividend',
                     'ReinvDiv': 'Reinvest',
+                    'ReinvInt': 'Reinvest',
                     'Splt': 'Split',
                     'StkSplit': 'Split',
                     'ShrsIn': 'ShrIn',
@@ -366,7 +382,8 @@ for acc_name, acc_obj in qif.accounts.items():
                 
                 # Διασφάλιση ότι οι τιμές δεν είναι None για να μην κρασάρει το SQL
                 qnt = tx.quantity if tx.quantity else 0
-                prc = tx.price if tx.price else 0
+            #    prc = tx.price if tx.price se 0
+                prc = tx.price if tx.price and my_action != 'Reinvest' else 0
                 comm = tx.commission if tx.commission else 0
                 amt = tx.amount if tx.amount else 0
 
@@ -378,7 +395,6 @@ for acc_name, acc_obj in qif.accounts.items():
 
         conn.commit()
 #conn.commit()
-
 
 
 # --- 4. Εισαγωγή Αποτιμήσεων
