@@ -1,5 +1,4 @@
 import os
-import json
 import streamlit as st
 import pandas as pd
 import psycopg2
@@ -15,11 +14,17 @@ import plotly.graph_objects as go
 import datetime as dt_lib
 import warnings
 import logging
-from duckduckgo_search import DDGS
 from langchain_community.utilities import SQLDatabase
 from langchain_community.agent_toolkits import create_sql_agent
+#from langchain_community.agent_toolkits.sql.base import create_sql_agent
+#from langchain_google_genai import ChatGoogleGenerativeAI
+#from langchain_openai import ChatOpenAI
+#from langchain_groq import ChatGroq
+from langchain_core.messages import SystemMessage
+#from langchain_community.chat_models import ChatOllama
 from langchain_ollama import ChatOllama
 from langchain_community.callbacks.streamlit import StreamlitCallbackHandler
+from langchain_core.prompts import PromptTemplate
 from langchain_community.chat_message_histories import StreamlitChatMessageHistory
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_core.chat_history import BaseChatMessageHistory
@@ -82,22 +87,138 @@ db = SQLDatabase.from_uri(pg_uri,
 #st.sidebar.write(f"Συνδεδεμένοι πίνακες: {actual_tables}") # Για να το βλέπεις και στο UI
 
 
-# 2. Αρχικοποίηση του LLM (Ollama - fully local)
+# 2. Αρχικοποίηση του LLM (π.χ. GPT-4o που είναι εξαιρετικό στην SQL)
+#os.environ["OPENAI_API_KEY"] = "sk-...." # Ή τράβηξέ το από τα st.secrets
+openai_api_key = os.environ["OPENAI_API_KEY"]
+gemini_key = os.getenv("GOOGLE_API_KEY")
+groq_api_key = os.getenv("GROQ_API_KEY")
 ollama_ip = os.getenv("OLLAMA_IP", "127.0.0.1")
 ollama_port = os.getenv("OLLAMA_PORT", "11434")
 ollama_model = os.getenv("OLLAMA_MODEL", "llama3.2:3b")
 
-# Κατασκευή του base_url
+#llm = ChatOpenAI(model="gpt-4o", temperature=0)
+# 2. Αρχικοποίηση του Gemini
+#llm = ChatGroq(
+#    groq_api_key=groq_api_key,
+#    model_name="llama-3.3-70b-versatile", # Το νεότερο και ισχυρότερο για SQL
+#    model_name="llama-3.1-8b-instant", # Πολύ μεγαλύτερα όρια, πολύ γρήγορο
+#    temperature=0
+#)
+
+# 2. Κατασκευή του base_url
 ollama_url = f"http://{ollama_ip}:{ollama_port}"
 
-# LLM instance
+llm_on_rpi = ChatOllama(
+    model=ollama_model, 
+    base_url=ollama_url,
+#    num_ctx=2048, # Μειωμένο context για ταχύτητα
+#    num_thread=4
+)
+
+# 2. Αρχικοποίηση με GPU-friendly ρυθμίσεις
+# Χρήση του dt_lib που ορίσαμε στην αρχή για να αποφύγουμε το conflict
+system_msg = f"You are a financial assistant. Today is {dt_lib.datetime.now().strftime('%Y-%m-%d')}. If a question is general, answer directly without using SQL tools."
+
 llm = ChatOllama(
     model=ollama_model,
     base_url=ollama_url,
+    system=system_msg,
     temperature=0
 )
 
-# SQL Agent prompt
+# 1. Δημιουργία του Toolkit
+toolkit = SQLDatabaseToolkit(db=db, llm=llm)
+
+
+# --- 1. Βελτιωμένο Router Prompt ---
+router_prompt = PromptTemplate(
+    input_variables=["question", "now"],
+    template="""Today is {now}. 
+    Decide if the question needs SQL database access (stock prices, transactions, table data) or is a GENERAL question.
+    
+    Question: {question}
+    Answer with ONLY 'SQL' or 'GENERAL'."""
+)
+
+def smart_query(user_input, st_callback):
+    # Δημιουργούμε το περιβάλλον της ερώτησης
+    full_prompt = f"Today is {full_date}. {user_input}"
+    
+    # 1. Απόφαση Router
+    router_chain = router_prompt | llm
+    decision_resp = router_chain.invoke({"question": user_input, "now": full_date})
+    decision = decision_resp.content.strip().upper()
+    
+    if "SQL" in decision:
+        st.info("🔍 Searching in the database...")
+        return agent_executor.invoke(
+            {"input": full_prompt}, # Στέλνουμε την ημερομηνία και στον Agent
+            {"callbacks": [st_callback]}
+        )["output"]
+    else:
+        st.info("🤖 Direct answer...")
+        # Στέλνουμε το full_prompt για να ξέρει την ημερομηνία
+        return llm.invoke(full_prompt).content
+
+
+# Παράδειγμα χρήσης:
+# response = smart_query("What is the current year?")
+# response = smart_query("What is the average price of ADMIE.AT in the last month?")
+
+
+# Σύνδεση με το ιστορικό του Streamlit
+msgs = StreamlitChatMessageHistory(key="sql_agent_history")
+
+# Συνάρτηση που επιστρέφει το ιστορικό (απαραίτητο για το νέο LangChain)
+def get_session_history(session_id: str) -> BaseChatMessageHistory:
+    return msgs
+
+# 1. Αρχικοποίηση μνήμης (πρέπει να γίνει ΜΙΑ φορά, π.χ. στο session_state του Streamlit)
+#if "agent_memory" not in st.session_state:
+#    st.session_state.agent_memory = ConversationBufferMemory(
+#        memory_key="chat_history", 
+#        return_messages=True
+#    )
+
+# Ο σωστός τρόπος για να περάσεις οδηγίες στον Zero-Shot Agent
+custom_suffix_old = """
+You are a financial assistant. Answer in English.
+Important: The table names in the database are 'securities' and 'historical_prices' (lowercase).
+Do not try to call tables with uppercase letters.
+
+if an SQL query do not return any data, do not repeat it more than 2 times. 
+Answer the user that no data was found for the specific period or stock.
+Always check if the ticker in the database is in uppercase or lowercase (use ILIKE).
+
+Here are some examples of past queries that worked:
+- For average price of a stock in the last month: SELECT AVG(p.price) FROM historical_prices p, securities s WHERE p.securities_id = s.securities_id AND s.yahoo_ticker = 'ADMIE.AT' AND p.date > NOW() - INTERVAL '1 month';
+- For expenses: SELECT SUM(amount) FROM bank_transactions WHERE amount < 0;
+
+Use these examples if the question is similar.
+
+Question: {input}
+Thought: I should look at the tables to see what I can use.
+{agent_scratchpad}
+"""
+
+custom_suffix_old_rtx = """
+You are a PostgreSQL expert. 
+When you need to run a query, you MUST use the following format:
+
+Thought: I need to query the database.
+Action: sql_db_query
+Action Input: SELECT * FROM table_name LIMIT 50;
+
+DO NOT just write the SQL query by itself. ALWAYS use the 'Action:' and 'Action Input:' prefixes.
+If you have the final answer, use:
+Final Answer: [your answer here]
+
+Question: {input}
+Thought: {agent_scratchpad}
+"""
+
+
+
 custom_suffix = """
 You MUST respond using the following format:
 
@@ -110,17 +231,43 @@ Action:
 
 Observation: [result of the action]
 ... (this repeats until you have the answer)
-Final Answer: [your final response]
+Final Answer: [your final response in Greek]
 
-IMPORTANT: Do not use Markdown code blocks (```) for the JSON action.
+IMPORTANT: Do not use Markdown code blocks (```) for the JSON action. 
 Always use double quotes for JSON keys and values.
-Table names are lowercase. Use ILIKE for case-insensitive text matching.
-If a query returns no data, do not retry more than 2 times — tell the user no data was found.
 
 Question: {input}
 {agent_scratchpad}
 """
 
+
+
+
+# Δημιουργία του Agent (όπως τον είχες)
+agent_executor_old = create_sql_agent(
+    llm=llm,
+    db=db,
+    agent_type="zero-shot-react-description",
+    verbose=True,
+    suffix=custom_suffix,
+    handle_parsing_errors=True,
+    allow_dangerous_requests=True
+)
+
+agent_executor_rtx_old = create_sql_agent(
+    llm=llm,
+    db=db,
+    agent_type="zero-shot-react-description",
+    verbose=True,
+    suffix=custom_suffix,
+    handle_parsing_errors=True,
+    allow_dangerous_requests=True,
+    max_iterations=10,        # Περισσότερες προσπάθειες (π.χ. από 5 σε 10)
+    max_execution_time=60.0    # Όριο 60 δευτερολέπτων
+)
+
+
+# 2. Δημιουργία του Agent
 agent_executor = create_sql_agent(
     llm=llm,
     db=db,
@@ -129,82 +276,19 @@ agent_executor = create_sql_agent(
     suffix=custom_suffix,
     handle_parsing_errors=True,
     max_iterations=5,
-    return_intermediate_steps=False,
+    # Προσθήκη αυτού για να αποφευχθεί το κενό output
+    return_intermediate_steps=False, 
     allow_dangerous_requests=True
 )
 
-# Chat history for the AI Assistant
-msgs = StreamlitChatMessageHistory(key="sql_agent_history")
 
-def get_session_history(session_id: str) -> BaseChatMessageHistory:
-    return msgs
-
+# "Τύλιγμα" του Agent με μνήμη
 agent_with_chat_history = RunnableWithMessageHistory(
     agent_executor,
     get_session_history,
     input_messages_key="input",
     history_messages_key="chat_history",
 )
-
-# ─── Web Search (DuckDuckGo) ───────────────────────────────────────────────
-def web_search(query: str, max_results: int = 5) -> str:
-    """Search DuckDuckGo and return a formatted string of results."""
-    try:
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=max_results))
-        if not results:
-            return "No web results found."
-        return "\n\n".join(
-            f"[{r['title']}]\n{r['body']}\nSource: {r['href']}"
-            for r in results
-        )
-    except Exception as e:
-        return f"Web search failed: {e}"
-
-# ─── AI Assistant router ───────────────────────────────────────────────────
-def run_ai_assistant(user_input: str) -> str:
-    """
-    Routes the question to:
-      - SQL agent  (database questions)
-      - Web search + LLM  (market/news questions)
-      - Direct LLM  (general questions)
-    """
-    full_date = dt_lib.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    full_prompt = f"Today is {full_date}. {user_input}"
-
-    # Step 1: ask the LLM how to route
-    decision = llm.invoke(
-        f"Today is {full_date}. Classify this question into exactly one category:\n"
-        f"- SQL   → needs data from a personal finance database (accounts, transactions, holdings, prices)\n"
-        f"- WEB   → needs current market data, news, or external financial info\n"
-        f"- GENERAL → everything else\n\n"
-        f"Question: {user_input}\n"
-        f"Answer with ONLY one word: SQL, WEB, or GENERAL."
-    ).content.strip().upper()
-
-    if "SQL" in decision:
-        st.info("🗄️ Querying your database...")
-        st_callback = StreamlitCallbackHandler(st.container())
-        config = {"configurable": {"session_id": "finance_os"}, "callbacks": [st_callback]}
-        response = agent_with_chat_history.invoke({"input": full_prompt}, config=config)
-        return response["output"]
-
-    elif "WEB" in decision:
-        st.info("🌐 Searching the web...")
-        web_results = web_search(user_input)
-        synthesis_prompt = (
-            f"Today is {full_date}.\n"
-            f"The user asked: {user_input}\n\n"
-            f"Here are web search results:\n{web_results}\n\n"
-            f"Please summarise the relevant information and answer the user's question clearly."
-        )
-        return llm.invoke(synthesis_prompt).content
-
-    else:
-        st.info("🤖 Answering directly...")
-        return llm.invoke(full_prompt).content
-
-
 
 # --- CONFIG & DB CONNECTION ---
 def get_connection():
@@ -2346,32 +2430,35 @@ try:
                         st.rerun() 
      
     elif menu == "🧠 AI Assistant":
-        st.title("🧠 AI Assistant")
-        st.caption(f"Powered by {ollama_model} · Fully local · Your data stays on your Pi")
+        st.title("AI Assistant")
 
-        col1, col2 = st.columns([6, 1])
-        with col2:
-            if st.button("🗑️ Clear chat"):
-                msgs.clear()
-                st.rerun()
-
-        # Display chat history
+        # 1. Εμφάνιση Ιστορικού (απαραίτητο για να μη χάνονται τα μηνύματα)
         for msg in msgs.messages:
             st.chat_message(msg.type).write(msg.content)
 
-        # Chat input
-        user_input = st.chat_input("Ask about your finances, holdings, transactions, or market news...")
+        # 2. Chat Input
+
+        # --- Streamlit UI Loop ---
+        # Ορίζουμε το prompt και ελέγχουμε αν υπάρχει τιμή ταυτόχρονα
+        user_input = st.chat_input("Ask questions about your finances:")
 
         if user_input:
             st.chat_message("user").write(user_input)
+            
             with st.chat_message("assistant"):
-                with st.spinner("Thinking..."):
-                    answer = run_ai_assistant(user_input)
-                st.write(answer)
-            # Persist user message in history (assistant reply is saved by the agent)
-            if not any(m.content == user_input for m in msgs.messages if m.type == "human"):
-                msgs.add_user_message(user_input)
-                msgs.add_ai_message(answer)
+                # 1. Γρήγορη απόφαση: SQL ή GENERAL;
+                decision = llm.invoke(f"Is this a question for an SQL database or a general one? Question: '{user_input}'. Answer only 'SQL' or 'GENERAL'.").content.strip().upper()
+
+                if "SQL" in decision:
+                    # Μόνο εδώ καλούμε τον Agent
+                    st_callback = StreamlitCallbackHandler(st.container())
+                    config = {"configurable": {"session_id": "any_id"}, "callbacks": [st_callback]}
+                    response = agent_with_chat_history.invoke({"input": user_input}, config=config)
+                    st.write(response["output"])
+                else:
+                    # Απευθείας απάντηση από το LLM (για ημερομηνίες, χαιρετισμούς κτλ)
+                    response = llm.invoke(user_input)
+                    st.write(response.content)
 
 
 

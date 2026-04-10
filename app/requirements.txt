@@ -1,3 +1,4 @@
+duckduckgo-search
 langchain-ollama
 langchain-community
 langchain
