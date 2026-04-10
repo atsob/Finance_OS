@@ -1,5 +1,6 @@
 import os
 import json
+from anyio import Path
 import streamlit as st
 import pandas as pd
 import psycopg2
@@ -24,9 +25,82 @@ from langchain_community.chat_message_histories import StreamlitChatMessageHisto
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_core.chat_history import BaseChatMessageHistory
 from langchain_community.agent_toolkits.sql.toolkit import SQLDatabaseToolkit
+#from langchain.tools import Tool
+from llama_index.core import StorageContext, load_index_from_storage
+from langchain_core.tools import Tool
+from pathlib import Path
+from llama_index.core import VectorStoreIndex, SimpleDirectoryReader, Settings
+from llama_index.embeddings.ollama import OllamaEmbedding
+from llama_index.llms.ollama import Ollama
+from llama_index.readers.database import DatabaseReader
+
+def load_and_index_from_db():
+    """Ανάγνωση δεδομένων από PostgreSQL και δημιουργία index"""
+    
+    # 1. Σύνδεση στη βάση (χρησιμοποίησε τις μεταβλητές που ήδη έχεις)
+    # Μορφή: postgresql://user:password@host:port/db_name
+  #  db_uri = f"postgresql://{user}:{password}@{host}:{port}/{db_name}"
+    db_uri = f"postgresql://admin:31.12.1969@192.168.4.20:11434/FinanceDB"
+    
+    db_reader = DatabaseReader(uri=db_uri)
+
+    # 2. Ορισμός του Query που θα φέρει τα δεδομένα για το RAG
+    # Παράδειγμα: Φέρνουμε τα ονόματα των μετοχών και τα ιστορικά τους σχόλια ή τιμές
+    query = """
+        SELECT 
+            concat('Security: ', s.security_name, ' - Price: ', h.price_close, ' - Date: ', h.price_date) as text
+        FROM securities s
+        JOIN historical_prices h ON s.id = h.security_id
+        --LIMIT 500;
+    """
+
+    # 3. Φόρτωση δεδομένων (το DatabaseReader τα μετατρέπει αυτόματα σε Documents)
+    docs = db_reader.load_data(query=query)
+
+    if not docs:
+        raise ValueError("Δεν βρέθηκαν δεδομένα στη βάση δεδομένων.")
+
+    # 4. Δημιουργία Index
+    index = VectorStoreIndex.from_documents(docs)
+
+    return index
 
 
+def get_or_create_index():
+    persist_dir = "/app/storage_rag"
+    docstore_path = os.path.join(persist_dir, "docstore.json")
+    
+    # Έλεγχος αν ο φάκελος ΥΠΑΡΧΕΙ ΚΑΙ αν περιέχει το αρχείο docstore.json
+    if not os.path.exists(docstore_path):
+        st.info("🔄 Δημιουργία νέου RAG Index από τη βάση δεδομένων...")
+        # Δημιουργία από τη βάση (η συνάρτηση που φτιάξαμε πριν)
+        index = load_and_index_from_db() 
+        
+        # Δημιουργία του φακέλου αν δεν υπάρχει
+        os.makedirs(persist_dir, exist_ok=True)
+        
+        # Αποθήκευση στο δίσκο
+        index.storage_context.persist(persist_dir=persist_dir)
+        st.success("✅ Το Index αποθηκεύτηκε επιτυχώς!")
+    else:
+        st.caption("📂 Φόρτωση RAG Index από το δίσκο...")
+        # Φόρτωση από το δίσκο
+        storage_context = StorageContext.from_defaults(persist_dir=persist_dir)
+        index = load_index_from_storage(storage_context)
+    
+    return index
 
+
+# Δημιουργία του RAG Engine
+rag_index = get_or_create_index()
+rag_engine = rag_index.as_query_engine()
+
+# Προσθήκη στα tools του Agent
+rag_tool = Tool(
+    name="Financial_Knowledge_Base",
+    func=lambda q: str(rag_engine.query(q)),
+    description="Χρησιμοποίησε αυτό το εργαλείο για περιλήψεις, εξηγήσεις οικονομικών όρων και ανάλυση κειμένων."
+)
 
 # Ρύθμιση του logger
 logging.basicConfig(
@@ -97,6 +171,11 @@ llm = ChatOllama(
     temperature=0
 )
 
+# 1. Δημιουργία του Toolkit για την SQL
+toolkit = SQLDatabaseToolkit(db=db, llm=llm)
+sql_tool = toolkit.get_sql_tool()
+
+
 # SQL Agent prompt
 custom_suffix = """
 You MUST respond using the following format:
@@ -121,7 +200,7 @@ Question: {input}
 {agent_scratchpad}
 """
 
-agent_executor = create_sql_agent(
+agent_executor_old = create_sql_agent(
     llm=llm,
     db=db,
     agent_type="zero-shot-react-description",
@@ -130,9 +209,22 @@ agent_executor = create_sql_agent(
     handle_parsing_errors=True,
     max_iterations=5,
     return_intermediate_steps=False,
-    allow_dangerous_requests=True
+    allow_dangerous_requests=True,
+    tools = [sql_tool, rag_tool]
 )
 
+# 2. Δημιουργία του Agent με το επιπλέον RAG Tool
+agent_executor = create_sql_agent(
+    llm=llm,
+    toolkit=toolkit,
+    extra_tools=[rag_tool], # <--- ΕΔΩ προσθέτεις το RAG
+    agent_type="zero-shot-react-description",
+    verbose=True,
+    suffix=custom_suffix,
+    handle_parsing_errors=True,
+    return_intermediate_steps=True,
+    allow_dangerous_requests=True
+)
 # Chat history for the AI Assistant
 msgs = StreamlitChatMessageHistory(key="sql_agent_history")
 

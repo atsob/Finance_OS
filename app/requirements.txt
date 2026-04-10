@@ -11,3 +11,10 @@ yfinance
 python-dateutil
 quiffen
 matplotlib
+llama-index-core
+llama-index-embeddings-ollama
+llama-index-llms-ollama
+llama-index-vector-stores-chroma
+llama-index-readers-database
+chromadb
+pypdf
