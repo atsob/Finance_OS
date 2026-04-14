@@ -3,12 +3,15 @@ CREATE TYPE Account_Type AS ENUM ('Cash', 'Checking', 'Savings', 'Credit Card', 
 CREATE TYPE Security_Type AS ENUM ('Stock', 'ETF', 'Bond', 'Mutual Fund', 'Crypto', 'Option', 'Commodity', 'PF_Unit');
 CREATE TYPE Transaction_Category_Type AS ENUM ('Income', 'Expense', 'Transfer', 'Investment_Buy', 'Investment_Sell', 'Dividend', 'Interest', 'Tax', 'Fee');
 CREATE TYPE Investment_Action AS ENUM ('Buy', 'Sell', 'Dividend', 'Reinvest', 'Split', 'ShrIn', 'ShrOut', 'IntInc', 'CashIn', 'CashOut', 'Vest', 'Expire', 'Grant', 'Exercise', 'MiscExp', 'RtrnCap');
+CREATE SEQUENCE IF NOT EXISTS transfer_id_seq START 1 INCREMENT 1;
 
 CREATE TABLE Currencies (
     Currencies_Id SERIAL PRIMARY KEY,
     Currencies_ShortName CHAR(3) UNIQUE NOT NULL, -- EUR, USD, GBP, BTC
     Currencies_Name VARCHAR(100) NOT NULL
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_currency_id ON Currencies(Currencies_Id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_currency_name ON Currencies(Currencies_ShortName);
 
 CREATE TABLE FinancialInstitutions (
     FinancialInstitutions_Id SERIAL PRIMARY KEY,
@@ -21,6 +24,8 @@ CREATE TABLE FinancialInstitutions (
     Website VARCHAR(255),
     Notes TEXT
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_institution_id ON FinancialInstitutions(FinancialInstitutions_Id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_institution_name ON FinancialInstitutions(FinancialInstitutions_Name);
 
 CREATE TABLE Categories (
     Categories_Id SERIAL PRIMARY KEY,
@@ -29,6 +34,8 @@ CREATE TABLE Categories (
     Category_Type Transaction_Category_Type NOT NULL,
     UNIQUE(Categories_Name, Parent_Category_Id)
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_category_id ON Categories(Categories_Id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_category_name ON Categories(Categories_Name, Parent_Category_Id);
 
 CREATE TABLE Securities (
     Securities_Id SERIAL PRIMARY KEY,
@@ -40,6 +47,8 @@ CREATE TABLE Securities (
     Is_Active BOOLEAN DEFAULT TRUE,
     Yahoo_Ticker VARCHAR(30)
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_security_id ON Securities(Securities_Id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_security_name ON Securities(Security_Name);
 
 CREATE TABLE Accounts (
     Accounts_Id SERIAL PRIMARY KEY,
@@ -51,6 +60,8 @@ CREATE TABLE Accounts (
     Account_Balance NUMERIC(28, 18) DEFAULT 0, -- Υψηλή ακρίβεια για Crypto/Satoshi
     Is_Active BOOLEAN DEFAULT TRUE
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_account_id ON Accounts(Accounts_Id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_account_name ON Accounts(Accounts_Name);
 
 CREATE TABLE Holdings (
     Holdings_Id SERIAL PRIMARY KEY,
@@ -61,6 +72,8 @@ CREATE TABLE Holdings (
     Last_Update TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(Accounts_Id, Securities_Id)
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_holding_id ON Holdings(Holdings_Id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_holding_accsec ON Holdings(Accounts_Id, Securities_Id);
 
 -- 1. Δημιουργία Πίνακα Payees
 CREATE TABLE Payees (
@@ -69,6 +82,8 @@ CREATE TABLE Payees (
     Default_Categories_Id INTEGER REFERENCES Categories(Categories_Id), -- Προαιρετικό: Αυτόματη κατηγορία
     Notes TEXT
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_payee_id ON Payees(Payees_Id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_payee_name ON Payees(Payees_Name);
 
 -- Κύριος πίνακας (Bank & Credit Cards)
 CREATE TABLE Bank_Transactions (
@@ -78,8 +93,12 @@ CREATE TABLE Bank_Transactions (
     Payees_Id INTEGER REFERENCES Payees(Payees_Id),
     Description TEXT,                -- π.χ. "Αγορά Τηλεόρασης - Δόση 1/12"
     Total_Amount NUMERIC(28, 18),    -- Συνολικό ποσό κίνησης
-    Cleared BOOLEAN DEFAULT FALSE    -- FALSE για τις μελλοντικές δόσεις
+    Cleared BOOLEAN DEFAULT FALSE,    -- FALSE για τις μελλοντικές δόσεις
+	Transfer_Id INTEGER NULL
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_transaction_id ON Bank_Transactions(Bank_Transactions_Id);
+CREATE INDEX IF NOT EXISTS idx_transfer_id ON Bank_Transactions(Transfer_Id) WHERE Transfer_Id IS NOT NULL;
 
 -- Πίνακας Splits (Εδώ γίνεται η ανάλυση κατηγοριών)
 CREATE TABLE Bank_Transaction_Splits (
@@ -89,6 +108,7 @@ CREATE TABLE Bank_Transaction_Splits (
     Amount NUMERIC(28, 18),
     Memo TEXT
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_split_id ON Bank_Transaction_Splits(Split_Id);
 
 CREATE OR REPLACE FUNCTION update_account_balance()
 RETURNS TRIGGER AS $$
@@ -100,8 +120,12 @@ BEGIN
         UPDATE Accounts SET Account_Balance = Account_Balance - OLD.Total_Amount 
         WHERE Accounts_Id = OLD.Accounts_Id;
     ELSIF (TG_OP = 'UPDATE') THEN
-        UPDATE Accounts SET Account_Balance = Account_Balance - OLD.Total_Amount + NEW.Total_Amount 
-        WHERE Accounts_Id = NEW.Accounts_Id;
+        -- 1. Αφαιρούμε το παλιό ποσό από τον ΠΑΛΙΟ λογαριασμό
+        UPDATE Accounts SET Account_Balance = Account_Balance - OLD.Total_Amount 
+        WHERE Accounts_Id = OLD.Accounts_Id;
+        -- 2. Προσθέτουμε το νέο ποσό στον ΝΕΟ λογαριασμό
+        UPDATE Accounts SET Account_Balance = Account_Balance + NEW.Total_Amount 
+        WHERE Accounts_Id = NEW.Accounts_Id;		
     END IF;
     RETURN NULL;
 END;
@@ -124,6 +148,7 @@ CREATE TABLE Investment_Transactions (
     Total_Amount NUMERIC(28, 18),      -- Συνολικό ποσό μετρητών που κινήθηκε
     Description TEXT
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_inv_transaction_id ON Investment_Transactions(Inv_Transactions_Id);
 
 -- Ιστορικό τιμών για Μετοχές, ETFs, Crypto, PF Units
 CREATE TABLE Historical_Prices (
@@ -134,6 +159,7 @@ CREATE TABLE Historical_Prices (
     PRIMARY KEY (Securities_Id, Price_Date)
 );
 ALTER TABLE Historical_Prices ADD UNIQUE (Securities_Id, Price_Date);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_price_id ON Historical_Prices(Securities_Id, Price_Date);
 
 -- Ιστορικό ισοτιμιών (FX Rates)
 CREATE TABLE Historical_FX (
@@ -144,3 +170,4 @@ CREATE TABLE Historical_FX (
     PRIMARY KEY (Base_Currency_Id, Target_Currency_Id, FX_Date)
 );
 ALTER TABLE Historical_FX ADD UNIQUE (Base_Currency_Id, Target_Currency_Id, FX_Date);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_fxrate_id ON Historical_FX(Base_Currency_Id, Target_Currency_Id, FX_Date);
